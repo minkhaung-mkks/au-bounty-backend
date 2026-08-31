@@ -1,0 +1,253 @@
+// AU Bounty — schema from Proposal v8, section 4.
+// Twelve tables. Messages, attachments and emergency alerts are defined here but
+// not yet exercised by v0.5; their features land in a later version.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  STUDENT
+  TEACHER
+  ADMIN
+  SERVICE
+}
+
+enum TaskType {
+  REQUEST
+  EVENT
+  EMERGENCY
+}
+
+enum TaskStatus {
+  OPEN
+  LOCKED
+  COMPLETED
+  CANCELLED
+}
+
+enum RewardType {
+  NONE
+  CASH
+  EXTRA_CREDIT
+  OTHER
+}
+
+enum AcceptanceMode {
+  AUTO
+  APPROVAL
+}
+
+enum AssignmentStatus {
+  APPLIED
+  ACCEPTED
+  REJECTED
+  IN_PROGRESS
+  PENDING_CONFIRMATION
+  COMPLETED
+  WITHDRAWN
+}
+
+enum TagCategory {
+  LANGUAGE
+  ACADEMIC
+  PRACTICAL
+  ERRAND
+}
+
+enum AlertStatus {
+  ACTIVE
+  RESOLVED
+  FLAGGED
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  msadOid      String?  @unique
+  universityId String?  @unique
+  name         String
+  email        String   @unique
+  role         Role     @default(STUDENT)
+  bio          String?
+  createdAt    DateTime @default(now())
+
+  postedTasks     Task[]            @relation("TaskPoster")
+  assignments     TaskAssignment[]
+  memberships     OrgMembership[]
+  reviewsWritten  Review[]          @relation("ReviewAuthor")
+  reviewsReceived Review[]          @relation("ReviewSubject")
+  messages        Message[]
+  attachments     Attachment[]
+  alerts          EmergencyAlert[]
+  tags            UserTag[]
+}
+
+model Organization {
+  id          String @id @default(uuid()) @db.Uuid
+  name        String @unique
+  description String @default("")
+
+  memberships OrgMembership[]
+  tasks       Task[]
+}
+
+model OrgMembership {
+  id       String @id @default(uuid()) @db.Uuid
+  userId   String @db.Uuid
+  orgId    String @db.Uuid
+  position String @default("Member")
+
+  user User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  org  Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, orgId])
+}
+
+model Task {
+  id              String         @id @default(uuid()) @db.Uuid
+  title           String
+  content         String
+  type            TaskType
+  status          TaskStatus     @default(OPEN)
+  posterId        String         @db.Uuid
+  externalRef     String?        @unique
+  orgId           String?        @db.Uuid
+  rewardType      RewardType     @default(NONE)
+  rewardDescription String       @default("")
+  maxTakers       Int            @default(1)
+  acceptanceMode  AcceptanceMode @default(APPROVAL)
+  locationName    String         @default("")
+  locationLat     Float?
+  locationLng     Float?
+  mapUrl          String?
+  // EVENT only. Base32 secret the rotating check-in code is derived from.
+  checkinSecret   String?
+  startsAt        DateTime?
+  deadline        DateTime?
+  createdAt       DateTime       @default(now())
+
+  poster      User             @relation("TaskPoster", fields: [posterId], references: [id])
+  org         Organization?    @relation(fields: [orgId], references: [id])
+  assignments TaskAssignment[]
+  reviews     Review[]
+  attachments Attachment[]
+  tags        TaskTag[]
+
+  @@index([type, status, createdAt])
+}
+
+model TaskAssignment {
+  id                     String           @id @default(uuid()) @db.Uuid
+  taskId                 String           @db.Uuid
+  takerId                String           @db.Uuid
+  status                 AssignmentStatus @default(APPLIED)
+  appliedAt              DateTime         @default(now())
+  checkedInAt            DateTime?
+  checkedInBy            String?          @db.Uuid
+  completionRequestedAt  DateTime?
+  completedAt            DateTime?
+
+  task     Task      @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  taker    User      @relation(fields: [takerId], references: [id], onDelete: Cascade)
+  messages Message[]
+
+  @@unique([taskId, takerId])
+  @@index([takerId, status])
+}
+
+model Review {
+  id         String   @id @default(uuid()) @db.Uuid
+  taskId     String   @db.Uuid
+  reviewerId String   @db.Uuid
+  revieweeId String   @db.Uuid
+  rating     Int
+  text       String   @default("")
+  // Double-blind gate. False until both sides submit (+1 day) or 7 days pass.
+  published  Boolean  @default(false)
+  // Set by an admin who removed abusive wording. The rating still counts.
+  textHidden Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  task     Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  reviewer User @relation("ReviewAuthor", fields: [reviewerId], references: [id], onDelete: Cascade)
+  reviewee User @relation("ReviewSubject", fields: [revieweeId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, reviewerId, revieweeId])
+  @@index([revieweeId, published])
+}
+
+model Tag {
+  id       String      @id @default(uuid()) @db.Uuid
+  name     String      @unique
+  category TagCategory
+
+  tasks TaskTag[]
+  users UserTag[]
+}
+
+model TaskTag {
+  taskId String @db.Uuid
+  tagId  String @db.Uuid
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  tag  Tag  @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([taskId, tagId])
+}
+
+model UserTag {
+  userId String @db.Uuid
+  tagId  String @db.Uuid
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tag  Tag  @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([userId, tagId])
+}
+
+model Message {
+  id           String    @id @default(uuid()) @db.Uuid
+  assignmentId String    @db.Uuid
+  senderId     String    @db.Uuid
+  content      String
+  createdAt    DateTime  @default(now())
+  readAt       DateTime?
+
+  assignment  TaskAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  sender      User           @relation(fields: [senderId], references: [id], onDelete: Cascade)
+  attachments Attachment[]
+}
+
+model Attachment {
+  id         String   @id @default(uuid()) @db.Uuid
+  uploaderId String   @db.Uuid
+  taskId     String?  @db.Uuid
+  messageId  String?  @db.Uuid
+  storageKey String   @unique
+  fileName   String
+  mimeType   String
+  sizeBytes  Int
+  createdAt  DateTime @default(now())
+
+  uploader User     @relation(fields: [uploaderId], references: [id], onDelete: Cascade)
+  task     Task?    @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  message  Message? @relation(fields: [messageId], references: [id], onDelete: Cascade)
+}
+
+model EmergencyAlert {
+  id              String      @id @default(uuid()) @db.Uuid
+  userId          String      @db.Uuid
+  lat             Float
+  lng             Float
+  message         String?
+  status          AlertStatus @default(ACTIVE)
+  forwardedToPeer Boolean     @default(false)
+  createdAt       DateTime    @default(now())
+  resolvedAt      DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
