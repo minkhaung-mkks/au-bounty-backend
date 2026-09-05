@@ -37,10 +37,17 @@ step('/assignments/:id/accept', async (a, user) => {
   if (!ownsTask(user, a.task)) throw forbidden('Only the poster decides who is accepted.')
   if (a.status !== 'APPLIED') throw conflict(`Cannot accept an assignment that is ${a.status}.`)
 
-  const taken = a.task.assignments.filter((x) => HOLDS_A_SPOT.includes(x.status)).length
-  if (taken >= a.task.maxTakers) throw conflict('Every spot is already filled.')
-
-  return prisma.taskAssignment.update({ where: { id: a.id }, data: { status: 'ACCEPTED' } })
+  // Occupancy check and accept run as one transaction on the locked task row,
+  // so a racing AUTO apply (or a second organizer clicking) cannot slip past
+  // maxTakers between the count and the write.
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "Task" WHERE id = ${a.taskId} FOR UPDATE`
+    const taken = await tx.taskAssignment.count({
+      where: { taskId: a.taskId, status: { in: HOLDS_A_SPOT } },
+    })
+    if (taken >= a.task.maxTakers) throw conflict('Every spot is already filled.')
+    return tx.taskAssignment.update({ where: { id: a.id }, data: { status: 'ACCEPTED' } })
+  })
 })
 
 step('/assignments/:id/reject', async (a, user) => {

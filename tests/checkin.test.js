@@ -231,6 +231,95 @@ describe('POST /tasks/:id/checkin', () => {
     expect((await prisma.taskAssignment.findUnique({ where: { id: assignment.id } })).status).toBe('ACCEPTED')
   })
 
+  test('five wrong codes lock the attendee out with 429 TOO_MANY_ATTEMPTS', async () => {
+    const { event, student } = await seedEvent()
+    await rsvp(event, student)
+
+    for (let i = 0; i < 5; i++) {
+      const res = await request(app)
+        .post(`${api}/tasks/${event.id}/checkin`)
+        .set(dev(student))
+        .send({ code: '000000' })
+      expect(res.status).toBe(400)
+      expect(res.body.error.code).toBe('BAD_CODE')
+    }
+
+    // The sixth attempt is refused before verification, so the 429 cannot be
+    // used as an oracle that the code finally became right.
+    const throttled = await request(app)
+      .post(`${api}/tasks/${event.id}/checkin`)
+      .set(dev(student))
+      .send({ code: '000000' })
+    expect(throttled.status).toBe(429)
+    expect(throttled.body.error.code).toBe('TOO_MANY_ATTEMPTS')
+    expect(throttled.body.error.details.retryAfterSeconds).toBeGreaterThanOrEqual(1)
+    expect(throttled.body.error.details.retryAfterSeconds).toBeLessThanOrEqual(300)
+
+    const withCorrectCode = await request(app)
+      .post(`${api}/tasks/${event.id}/checkin`)
+      .set(dev(student))
+      .send({ code: currentCode('SEEDSECRETA') })
+    expect(withCorrectCode.status).toBe(429)
+
+    expect(
+      (await prisma.taskAssignment.findFirst({ where: { taskId: event.id } })).status,
+    ).toBe('ACCEPTED')
+  })
+
+  test('a correct code within budget still succeeds before the cap', async () => {
+    const { event, student } = await seedEvent()
+    await rsvp(event, student)
+
+    for (let i = 0; i < 4; i++) {
+      expect(
+        (
+          await request(app)
+            .post(`${api}/tasks/${event.id}/checkin`)
+            .set(dev(student))
+            .send({ code: 'nope' })
+        ).status,
+      ).toBe(400)
+    }
+
+    const res = await request(app)
+      .post(`${api}/tasks/${event.id}/checkin`)
+      .set(dev(student))
+      .send({ code: currentCode('SEEDSECRETA') })
+    expect(res.status).toBe(200)
+    expect(res.body.assignment.status).toBe('COMPLETED')
+  })
+
+  test('a successful check-in clears the miss counter', async () => {
+    const { event, student } = await seedEvent()
+    await rsvp(event, student)
+
+    for (let i = 0; i < 4; i++) {
+      await request(app).post(`${api}/tasks/${event.id}/checkin`).set(dev(student)).send({ code: 'nope' })
+    }
+    // A second attendee on the same event has a budget of their own.
+    const other = await createUser({ name: 'Second Attendee' })
+    await rsvp(event, other)
+
+    expect(
+      (
+        await request(app)
+          .post(`${api}/tasks/${event.id}/checkin`)
+          .set(dev(student))
+          .send({ code: currentCode('SEEDSECRETA') })
+      ).status,
+    ).toBe(200)
+
+    // The other attendee is untouched by anyone else's misses.
+    expect(
+      (
+        await request(app)
+          .post(`${api}/tasks/${event.id}/checkin`)
+          .set(dev(other))
+          .send({ code: currentCode('SEEDSECRETA') })
+      ).status,
+    ).toBe(200)
+  })
+
   test('a code one step old still validates (clock drift tolerance)', async () => {
     const { event, student } = await seedEvent()
     await rsvp(event, student)
@@ -259,6 +348,49 @@ describe('POST /tasks/:id/checkin', () => {
       .set(dev(student))
       .send({ code: currentCode('SEEDSECRETA') })
     expect(res.status).toBe(403)
+  })
+
+  test('a cancelled event takes no more check-ins', async () => {
+    const { event, student } = await seedEvent()
+    await rsvp(event, student)
+    await prisma.task.update({ where: { id: event.id }, data: { status: 'CANCELLED' } })
+
+    const res = await request(app)
+      .post(`${api}/tasks/${event.id}/checkin`)
+      .set(dev(student))
+      .send({ code: currentCode('SEEDSECRETA') })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('TASK_CLOSED')
+    expect(
+      (await prisma.taskAssignment.findFirst({ where: { taskId: event.id } })).status,
+    ).toBe('ACCEPTED')
+  })
+
+  test('a completed event takes no more check-ins', async () => {
+    const { event, student } = await seedEvent()
+    await rsvp(event, student)
+    await prisma.task.update({ where: { id: event.id }, data: { status: 'COMPLETED' } })
+
+    const res = await request(app)
+      .post(`${api}/tasks/${event.id}/checkin`)
+      .set(dev(student))
+      .send({ code: currentCode('SEEDSECRETA') })
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('TASK_CLOSED')
+  })
+
+  test('a full event LOCKED at the door still takes check-ins', async () => {
+    const { event, student } = await seedEvent({ maxTakers: 1 })
+    await rsvp(event, student)
+    await prisma.task.update({ where: { id: event.id }, data: { status: 'LOCKED' } })
+
+    const res = await request(app)
+      .post(`${api}/tasks/${event.id}/checkin`)
+      .set(dev(student))
+      .send({ code: currentCode('SEEDSECRETA') })
+    expect(res.status).toBe(200)
+    expect(res.body.assignment.status).toBe('COMPLETED')
   })
 
   test('non-events and unknown ids are 404', async () => {

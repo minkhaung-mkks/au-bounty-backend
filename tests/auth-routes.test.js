@@ -31,8 +31,29 @@ beforeEach(async () => {
   vi.clearAllMocks()
 })
 
+/**
+ * Runs /auth/login and captures what the server would hand to Microsoft: the
+ * state blob and the nonce cookie issued alongside it. A real browser carries
+ * both through the OAuth hop; tests do the same by hand.
+ */
+async function beginLogin(app, returnTo) {
+  msal.getAuthCodeUrl.mockResolvedValue(AUTH_URL)
+  const login = await request(app).get(
+    `/aubounty/api/auth/login${returnTo ? `?returnTo=${encodeURIComponent(returnTo)}` : ''}`,
+  )
+  const state = msal.getAuthCodeUrl.mock.calls.at(-1)[0].state
+  const cookie = login.headers['set-cookie'].find((c) => c.startsWith('aubounty_oauth_nonce='))
+  return { state, nonceCookie: cookie?.split(';')[0] }
+}
+
+/** /auth/callback exactly as a browser would send it after beginLogin. */
+const callbackWith = (app, { state, nonceCookie }) =>
+  request(app)
+    .get(`/aubounty/api/auth/callback?code=abc&state=${encodeURIComponent(state)}`)
+    .set('Cookie', nonceCookie ?? '')
+
 describe('GET /auth/login', () => {
-  test('302s to Microsoft with tenant, client id, callback and state', async () => {
+  test('302s to Microsoft with tenant, client id, callback, state and a nonce cookie', async () => {
     msal.getAuthCodeUrl.mockResolvedValue(AUTH_URL)
     const app = appWith({ entraSecret: 'secret-value' })
 
@@ -51,6 +72,8 @@ describe('GET /auth/login', () => {
         }),
       }),
     )
+
+    const { state } = msal.getAuthCodeUrl.mock.calls[0][0]
     expect(msal.getAuthCodeUrl).toHaveBeenCalledWith(
       expect.objectContaining({
         scopes: ['openid', 'email', 'profile'],
@@ -58,6 +81,21 @@ describe('GET /auth/login', () => {
         state: expect.any(String),
       }),
     )
+
+    // The login drops a short-lived httpOnly nonce cookie and puts the same
+    // value inside the state: the callback will refuse anything that does not
+    // match both halves.
+    const nonceCookie = res.headers['set-cookie'].find((c) => c.startsWith('aubounty_oauth_nonce='))
+    expect(nonceCookie).toBeDefined()
+    expect(nonceCookie).toContain('HttpOnly')
+    expect(nonceCookie).toContain('Path=/aubounty/api')
+    expect(nonceCookie).toContain('SameSite=Lax')
+    expect(nonceCookie).toContain('Max-Age=600')
+    expect(nonceCookie).not.toContain('Secure')
+
+    const decoded = JSON.parse(Buffer.from(state, 'base64url').toString('utf8'))
+    expect(decoded.r).toBe('/tasks')
+    expect(decoded.n).toBe(nonceCookie.split(';')[0].split('=')[1])
   })
 
   test('503 { error: "auth not configured" } when the entra block is incomplete', async () => {
@@ -77,7 +115,8 @@ describe('GET /auth/callback', () => {
       idTokenClaims: { oid: 'oid-new', name: 'Jane Doe', preferred_username: 'jane@au.edu' },
     })
 
-    const res = await request(app).get('/aubounty/api/auth/callback?code=abc&state=')
+    const login = await beginLogin(app)
+    const res = await callbackWith(app, login)
 
     expect(res.status).toBe(302)
     expect(res.headers.location).toBe('/')
@@ -98,6 +137,11 @@ describe('GET /auth/callback', () => {
     expect(cookie).toContain('Max-Age=3600')
     expect(cookie).not.toContain('Secure')
 
+    // Success spends the nonce: it is cleared in the same response.
+    const cleared = res.headers['set-cookie'].find((c) => c.startsWith('aubounty_oauth_nonce='))
+    expect(cleared).toBeDefined()
+    expect(new Date(cleared.match(/Expires=([^;]+)/i)?.[1]).getTime()).toBeLessThan(Date.now())
+
     // The cookie we just issued authenticates the next request.
     const me = await request(app)
       .get('/aubounty/api/me')
@@ -113,7 +157,7 @@ describe('GET /auth/callback', () => {
       idTokenClaims: { oid: 'oid-known', name: 'New Name', preferred_username: 'new@au.edu' },
     })
 
-    const res = await request(app).get('/aubounty/api/auth/callback?code=abc&state=')
+    const res = await callbackWith(app, await beginLogin(app))
 
     expect(res.status).toBe(302)
     const count = await prisma.user.count({ where: { msadOid: 'oid-known' } })
@@ -127,7 +171,7 @@ describe('GET /auth/callback', () => {
     msal.acquireTokenByCode.mockResolvedValue({
       idTokenClaims: { oid: 'oid-emp', name: 'Emp', preferred_username: 'emp@au.edu', employeeId: '6701234' },
     })
-    await request(app).get('/aubounty/api/auth/callback?code=abc&state=')
+    expect((await callbackWith(app, await beginLogin(app))).status).toBe(302)
     expect(
       (await prisma.user.findUnique({ where: { msadOid: 'oid-emp' } })).universityId,
     ).toBe('6701234')
@@ -136,7 +180,7 @@ describe('GET /auth/callback', () => {
     msal.acquireTokenByCode.mockResolvedValue({
       idTokenClaims: { oid: 'oid-emp', name: 'Emp', preferred_username: 'emp@au.edu', employeeId: '9999999' },
     })
-    await request(app).get('/aubounty/api/auth/callback?code=abc&state=')
+    expect((await callbackWith(app, await beginLogin(app))).status).toBe(302)
     expect(
       (await prisma.user.findUnique({ where: { msadOid: 'oid-emp' } })).universityId,
     ).toBe('6701234')
@@ -144,31 +188,23 @@ describe('GET /auth/callback', () => {
 
   test('redirects to the sanitized returnTo carried in state', async () => {
     const app = appWith({ entraSecret: 'secret-value' })
-    msal.getAuthCodeUrl.mockImplementation(
-      async (req) => `${AUTH_URL}&state=${encodeURIComponent(req.state)}`,
-    )
     msal.acquireTokenByCode.mockResolvedValue({
       idTokenClaims: { oid: 'oid-r', name: 'R', preferred_username: 'r@au.edu' },
     })
 
-    await request(app).get('/aubounty/api/auth/login?returnTo=/tasks/42')
-    const encoded = msal.getAuthCodeUrl.mock.calls[0][0].state
-
-    const res = await request(app).get(`/aubounty/api/auth/callback?code=abc&state=${encodeURIComponent(encoded)}`)
+    const login = await beginLogin(app, '/tasks/42')
+    const res = await callbackWith(app, login)
     expect(res.headers.location).toBe('/tasks/42')
   })
 
   test('an evil returnTo never becomes the redirect target', async () => {
     const app = appWith({ entraSecret: 'secret-value' })
-    msal.getAuthCodeUrl.mockResolvedValue(AUTH_URL)
     msal.acquireTokenByCode.mockResolvedValue({
       idTokenClaims: { oid: 'oid-e', name: 'E', preferred_username: 'e@au.edu' },
     })
 
-    await request(app).get('/aubounty/api/auth/login?returnTo=https://evil.example.net/catch')
-    const encoded = msal.getAuthCodeUrl.mock.calls[0][0].state
-
-    const res = await request(app).get(`/aubounty/api/auth/callback?code=abc&state=${encodeURIComponent(encoded)}`)
+    const login = await beginLogin(app, 'https://evil.example.net/catch')
+    const res = await callbackWith(app, login)
     expect(res.status).toBe(302)
     expect(res.headers.location).toBe('/')
     expect(res.headers.location).not.toContain('evil.example.net')
@@ -176,15 +212,59 @@ describe('GET /auth/callback', () => {
 
   test('APP_ORIGIN prefixes the redirect for cross-origin dev setups', async () => {
     const app = appWith({ entraSecret: 'secret-value', appOrigin: 'http://localhost:5173/' })
-    msal.getAuthCodeUrl.mockResolvedValue(AUTH_URL)
     msal.acquireTokenByCode.mockResolvedValue({
       idTokenClaims: { oid: 'oid-o', name: 'O', preferred_username: 'o@au.edu' },
     })
 
-    await request(app).get('/aubounty/api/auth/login?returnTo=/tasks')
-    const encoded = msal.getAuthCodeUrl.mock.calls[0][0].state
-    const res = await request(app).get(`/aubounty/api/auth/callback?code=abc&state=${encodeURIComponent(encoded)}`)
+    const res = await callbackWith(app, await beginLogin(app, '/tasks'))
     expect(res.headers.location).toBe('http://localhost:5173/tasks')
+  })
+
+  test('a state nonce that does not match the cookie is a 401, not a session', async () => {
+    const app = appWith({ entraSecret: 'secret-value' })
+    msal.acquireTokenByCode.mockResolvedValue({
+      idTokenClaims: { oid: 'oid-forged', name: 'F', preferred_username: 'f@au.edu' },
+    })
+
+    const login = await beginLogin(app, '/tasks')
+    const res = await request(app)
+      .get(`/aubounty/api/auth/callback?code=abc&state=${encodeURIComponent(login.state)}`)
+      .set('Cookie', 'aubounty_oauth_nonce=somebodyelsesnonce')
+
+    expect(res.status).toBe(401)
+    expect(res.body.error.code).toBe('AUTH_FAILED')
+    expect(msal.acquireTokenByCode).not.toHaveBeenCalled()
+    const user = await prisma.user.findUnique({ where: { msadOid: 'oid-forged' } })
+    expect(user).toBeNull()
+    // Refusal spends the nonce too.
+    const cleared = res.headers['set-cookie'].find((c) => c.startsWith('aubounty_oauth_nonce='))
+    expect(cleared).toBeDefined()
+    expect(new Date(cleared.match(/Expires=([^;]+)/i)?.[1]).getTime()).toBeLessThan(Date.now())
+  })
+
+  test('a state with no nonce at all, or no cookie to match, is a 401', async () => {
+    const app = appWith({ entraSecret: 'secret-value' })
+    msal.acquireTokenByCode.mockResolvedValue({
+      idTokenClaims: { oid: 'oid-n', name: 'N', preferred_username: 'n@au.edu' },
+    })
+
+    // State blob without a nonce, cookie present.
+    const bare = Buffer.from(JSON.stringify({ r: '/', n: null }), 'utf8').toString('base64url')
+    const noNonceInState = await request(app)
+      .get(`/aubounty/api/auth/callback?code=abc&state=${encodeURIComponent(bare)}`)
+      .set('Cookie', 'aubounty_oauth_nonce=whatever')
+    expect(noNonceInState.status).toBe(401)
+    expect(noNonceInState.body.error.code).toBe('AUTH_FAILED')
+
+    // Proper state, but the cookie never made it back.
+    const login = await beginLogin(app, '/tasks')
+    const noCookie = await request(app)
+      .get(`/aubounty/api/auth/callback?code=abc&state=${encodeURIComponent(login.state)}`)
+    expect(noCookie.status).toBe(401)
+    expect(noCookie.body.error.code).toBe('AUTH_FAILED')
+
+    expect(msal.acquireTokenByCode).not.toHaveBeenCalled()
+    expect(await prisma.user.count({ where: { msadOid: 'oid-n' } })).toBe(0)
   })
 
   test('a Microsoft-side error surfaces as 401 instead of a redirect loop', async () => {

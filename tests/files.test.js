@@ -297,6 +297,25 @@ describe('GET /files/:id/url', () => {
     }
   })
 
+  test('control characters in a filename cannot forge response headers', async () => {
+    const world = await seed()
+    const app = appWith()
+    const presigned = await presignTask(app, world.poster, {
+      taskId: world.task.id,
+      fileName: 'evil\r\nSet-Cookie: pwn=1; q"r\\s.txt',
+    })
+    expect(presigned.status).toBe(201)
+
+    const res = await request(app)
+      .get(`${api}/files/${presigned.body.attachmentId}/url`)
+      .set(dev(world.taker))
+    expect(res.status).toBe(200)
+
+    const disposition = decodeURIComponent(res.body.url)
+    expect(disposition).toContain('filename="evilSet-Cookie: pwn=1; qrs.txt"')
+    expect(disposition).not.toMatch(/[\r\n\x00]/)
+  })
+
   test('message attachment urls stay inside the thread', async () => {
     const { app, poster, taker, outsider, admin, attachmentId } = await messageAttachment()
     // The two participants (sender + counterpart) see it; nobody else does,

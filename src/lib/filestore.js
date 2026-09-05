@@ -20,6 +20,15 @@ import { ApiError } from './errors.js'
 
 const DEFAULT_TTL_SECONDS = 300
 
+/**
+ * Strips everything that could break out of the quoted-string in a
+ * Content-Disposition header: quotes and backslashes (the classic escape), and
+ * C0 control characters plus DEL (\r and \n included — a crafted filename must
+ * not be able to forge extra response headers).
+ */
+const UNSAFE_FILENAME_CHARS = /["\\\x00-\x1f\x7f]/g
+const sanitizeFileName = (fileName) => fileName.replace(UNSAFE_FILENAME_CHARS, '')
+
 function s3Settings() {
   return {
     endpoint: process.env.S3_ENDPOINT || undefined,
@@ -102,7 +111,9 @@ export const fileStore = {
       Bucket: s3Settings().bucket,
       Key: key,
       ...(fileName
-        ? { ResponseContentDisposition: `attachment; filename="${fileName.replace(/["\\]/g, '')}"` }
+        ? {
+            ResponseContentDisposition: `attachment; filename="${sanitizeFileName(fileName)}"`,
+          }
         : {}),
     })
     return getSignedUrl(client(), command, { expiresIn: ttlSeconds })

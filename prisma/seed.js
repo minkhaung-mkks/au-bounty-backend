@@ -1,4 +1,9 @@
+import { randomBytes } from 'node:crypto'
 import { prisma } from '../src/lib/prisma.js'
+
+// Every seeded event gets its own unpredictable attendance secret at seed
+// time, exactly like the create route does for real events.
+const checkinSecret = () => randomBytes(20).toString('hex')
 
 const daysAgo = (n) => new Date(Date.now() - n * 24 * 60 * 60 * 1000)
 const daysAhead = (n) => new Date(Date.now() + n * 24 * 60 * 60 * 1000)
@@ -238,7 +243,7 @@ async function main() {
       acceptanceMode: 'AUTO',
       locationName: 'Auditorium, Building E',
       startsAt: daysAhead(3),
-      checkinSecret: 'SEEDSECRETA',
+      checkinSecret: checkinSecret(),
       createdAt: daysAgo(6),
     },
     ['Design'],
@@ -264,7 +269,7 @@ async function main() {
       acceptanceMode: 'AUTO',
       locationName: 'Room 402, Building F',
       startsAt: daysAhead(6),
-      checkinSecret: 'SEEDSECRETB',
+      checkinSecret: checkinSecret(),
       createdAt: daysAgo(3),
     },
     ['Research'],

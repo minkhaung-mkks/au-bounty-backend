@@ -45,7 +45,24 @@ const createBody = z.object({
   tagIds: z.array(z.uuid()).min(1, 'Pick at least one tag.').max(3, 'Three tags maximum.'),
 })
 
-const patchBody = createBody.partial().omit({ type: true })
+// The sponsoring org is chosen at creation and is immutable: letting a patch
+// move it would let a poster re-sponsor their posting onto an org they no
+// longer belong to. orgId is absent from the schema and its presence is a
+// validation error, not a silently ignored key.
+const patchBody = z.preprocess(
+  (raw, ctx) => {
+    if (raw && typeof raw === 'object' && !Array.isArray(raw) && 'orgId' in raw) {
+      ctx.issues.push({
+        code: 'custom',
+        path: ['orgId'],
+        message: 'The sponsoring organization cannot be changed after posting.',
+        input: raw,
+      })
+    }
+    return raw
+  },
+  createBody.partial().omit({ type: true, orgId: true }),
+)
 
 const checkinBody = z.object({ code: z.string().trim().min(1).max(32) })
 
@@ -315,6 +332,36 @@ tasksRouter.post('/tasks/:id/cancel', requireUser, validate({ params: idParam })
 
 /* ------------------------------------------------------------------ apply */
 
+/**
+ * Writes the application. On AUTO tasks the occupancy count and the write run
+ * as one transaction on the task row locked with SELECT ... FOR UPDATE, so two
+ * simultaneous requests for the last seat serialize behind each other instead
+ * of both counting it free. APPROVAL tasks have no occupancy gate (the poster
+ * picks who gets in), so they take the plain write.
+ */
+async function claimSeat({ task, existing, userId, status }) {
+  const write = (tx) =>
+    existing
+      ? tx.taskAssignment.update({
+          where: { id: existing.id },
+          data: { status, appliedAt: new Date() },
+        })
+      : tx.taskAssignment.create({
+          data: { taskId: task.id, takerId: userId, status },
+        })
+
+  if (task.acceptanceMode !== 'AUTO') return write(prisma)
+
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "Task" WHERE id = ${task.id} FOR UPDATE`
+    const taken = await tx.taskAssignment.count({
+      where: { taskId: task.id, status: { in: HOLDS_A_SPOT } },
+    })
+    if (taken >= task.maxTakers) throw conflict('No spots left.')
+    return write(tx)
+  })
+}
+
 // One endpoint for both "apply to help" and "reserve a seat". An event is just a
 // task whose acceptance mode is AUTO.
 tasksRouter.post('/tasks/:id/apply', requireUser, validate({ params: idParam }), async (req, res) => {
@@ -331,26 +378,47 @@ tasksRouter.post('/tasks/:id/apply', requireUser, validate({ params: idParam }),
     throw conflict('You are already on this task.')
   }
 
-  const taken = task.assignments.filter((a) => HOLDS_A_SPOT.includes(a.status)).length
-  if (task.acceptanceMode === 'AUTO' && taken >= task.maxTakers) {
-    throw conflict('No spots left.')
-  }
-
   const status = task.acceptanceMode === 'AUTO' ? 'ACCEPTED' : 'APPLIED'
-  const assignment = existing
-    ? await prisma.taskAssignment.update({
-        where: { id: existing.id },
-        data: { status, appliedAt: new Date() },
-      })
-    : await prisma.taskAssignment.create({
-        data: { taskId: task.id, takerId: req.user.id, status },
-      })
+  const assignment = await claimSeat({ task, existing, userId: req.user.id, status })
 
   await emitTaskUpdated(task.id)
   res.status(201).json({ assignment })
 })
 
 /* --------------------------------------------------------------- check-in */
+
+// The check-in code is only six digits, so guessing is cheap unless it costs
+// something. Failed verifications are counted per attendee per event in
+// memory: five misses in a rolling five minutes and the endpoint answers 429
+// until the oldest miss ages out. A successful check-in clears the slate.
+const CHECKIN_MAX_FAILURES = 5
+const CHECKIN_WINDOW_MS = 5 * 60 * 1000
+const checkinFailures = new Map() // `${userId}:${taskId}` -> [failure timestamps]
+
+/** Prunes one key's expired stamps; returns the still-live ones. */
+function liveFailures(key, now = Date.now()) {
+  const windowStart = now - CHECKIN_WINDOW_MS
+  const stamps = (checkinFailures.get(key) ?? []).filter((t) => t > windowStart)
+  // Prune-on-access keeps the map from growing with dead entries forever.
+  if (stamps.length) checkinFailures.set(key, stamps)
+  else checkinFailures.delete(key)
+  return stamps
+}
+
+/** Seconds until the door reopens, or null when the caller is within budget. */
+function checkinRetryAfter(userId, taskId) {
+  const stamps = liveFailures(`${userId}:${taskId}`)
+  if (stamps.length < CHECKIN_MAX_FAILURES) return null
+  return Math.max(1, Math.ceil((stamps[0] + CHECKIN_WINDOW_MS - Date.now()) / 1000))
+}
+
+function recordCheckinFailure(userId, taskId) {
+  const key = `${userId}:${taskId}`
+  const stamps = liveFailures(key)
+  stamps.push(Date.now())
+  checkinFailures.set(key, stamps)
+}
+
 
 // The organizer side of D4: the code to project at the venue, derived from the
 // event's secret and rotating every 60 seconds.
@@ -384,6 +452,11 @@ tasksRouter.post(
       include: { assignments: true },
     })
     if (!task || task.type !== 'EVENT') throw notFound('No event with that id.')
+    // Attendance is only taken while the event is live: OPEN, or LOCKED because
+    // the room is full. A cancelled or already-finished event accepts nothing.
+    if (task.status !== 'OPEN' && task.status !== 'LOCKED') {
+      throw new ApiError(409, 'TASK_CLOSED', 'This event is closed and takes no more check-ins.')
+    }
 
     const mine = task.assignments.find((a) => a.takerId === req.user.id)
     if (!mine || (mine.status !== 'ACCEPTED' && mine.status !== 'COMPLETED')) {
@@ -391,11 +464,22 @@ tasksRouter.post(
     }
     if (mine.status === 'COMPLETED') throw conflict('You are already checked in.')
 
+    // Once the miss budget is spent, even a correct code is refused: the
+    // throttled response must not become an oracle for "now it is right".
+    const retryAfterSeconds = checkinRetryAfter(req.user.id, task.id)
+    if (retryAfterSeconds !== null) {
+      throw new ApiError(429, 'TOO_MANY_ATTEMPTS', 'Too many wrong codes. Try again later.', {
+        retryAfterSeconds,
+      })
+    }
+
     // The error never says how close a guess was, or whether it was early or
     // late: one message for wrong and expired alike.
     if (!task.checkinSecret || !verify(task.checkinSecret, req.valid.body.code)) {
+      recordCheckinFailure(req.user.id, task.id)
       throw new ApiError(400, 'BAD_CODE', 'That code is wrong or no longer current.')
     }
+    checkinFailures.delete(`${req.user.id}:${task.id}`)
 
     const now = new Date()
     const assignment = await prisma.taskAssignment.update({

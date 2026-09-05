@@ -42,3 +42,21 @@ export function sessionCookieOptions() {
     secure: process.env.COOKIE_SECURE === 'true',
   }
 }
+
+/**
+ * CSRF guard for the OAuth hop: /auth/login drops a one-time nonce that must
+ * come back both in the cookie and inside the state blob, tying the callback
+ * to an authorization request this server actually issued.
+ */
+export const NONCE_COOKIE = 'aubounty_oauth_nonce'
+export const NONCE_TTL_SECONDS = 10 * 60
+
+export function nonceCookieOptions() {
+  return {
+    httpOnly: true,
+    sameSite: 'lax',
+    path: '/aubounty/api',
+    maxAge: NONCE_TTL_SECONDS * 1000,
+    secure: process.env.COOKIE_SECURE === 'true',
+  }
+}

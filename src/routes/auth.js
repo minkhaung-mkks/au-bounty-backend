@@ -1,12 +1,27 @@
 import { Router } from 'express'
+import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { prisma } from '../lib/prisma.js'
 import { ENTRA_SCOPES, isEntraConfigured, msalClient, redirectUri } from '../auth/entra.js'
+import { parseCookies } from '../auth/cookies.js'
 import { decodeState, encodeState, postLoginRedirect } from '../auth/returnTo.js'
-import { TOKEN_COOKIE, sessionCookieOptions, signSessionToken } from '../auth/session.js'
+import {
+  NONCE_COOKIE,
+  TOKEN_COOKIE,
+  nonceCookieOptions,
+  sessionCookieOptions,
+  signSessionToken,
+} from '../auth/session.js'
 
 export const authRouter = Router()
 
 const notConfigured = (res) => res.status(503).json({ error: 'auth not configured' })
+
+/** Constant-time compare for equal-length secrets; mismatched lengths say no. */
+function secretsMatch(a, b) {
+  const bufA = Buffer.from(String(a))
+  const bufB = Buffer.from(String(b))
+  return bufA.length === bufB.length && bufA.length > 0 && timingSafeEqual(bufA, bufB)
+}
 
 /* ------------------------------------------------------------------ login */
 
@@ -15,11 +30,16 @@ authRouter.get('/auth/login', async (req, res, next) => {
   try {
     // returnTo rides through Microsoft inside the state blob, sanitized first:
     // an attacker-supplied absolute URL must never become our redirect target.
+    // The nonce joins it, and a copy is dropped as a short-lived cookie; the
+    // callback only honors state whose nonce matches that cookie, so a flow an
+    // attacker started themselves cannot end in our session cookie.
+    const nonce = randomBytes(16).toString('base64url')
     const url = await msalClient().getAuthCodeUrl({
       scopes: ENTRA_SCOPES,
       redirectUri: redirectUri(),
-      state: encodeState(req.query.returnTo),
+      state: encodeState(req.query.returnTo, nonce),
     })
+    res.cookie(NONCE_COOKIE, nonce, nonceCookieOptions())
     res.redirect(302, url)
   } catch (err) {
     next(err)
@@ -30,10 +50,27 @@ authRouter.get('/auth/login', async (req, res, next) => {
 
 authRouter.get('/auth/callback', async (req, res, next) => {
   if (!isEntraConfigured()) return notConfigured(res)
+  // The nonce is spent the moment the callback runs, whatever happens next.
+  const { path, ...clearOptions } = nonceCookieOptions()
+  res.clearCookie(NONCE_COOKIE, { path, ...clearOptions })
   try {
     if (req.query.error) {
       return res.status(401).json({
         error: { code: 'AUTH_FAILED', message: String(req.query.error_description ?? req.query.error) },
+      })
+    }
+
+    // Login CSRF guard: the state must carry the nonce this server issued in
+    // the aubounty_oauth_nonce cookie. Missing on either side, or a mismatch,
+    // means the authorization request did not come from our /auth/login.
+    const { returnTo, nonce } = decodeState(req.query.state)
+    const cookieNonce = parseCookies(req.get('cookie'))[NONCE_COOKIE]
+    if (!nonce || !cookieNonce || !secretsMatch(nonce, cookieNonce)) {
+      return res.status(401).json({
+        error: {
+          code: 'AUTH_FAILED',
+          message: 'The login attempt expired or did not start here. Sign in again.',
+        },
       })
     }
 
@@ -56,7 +93,7 @@ authRouter.get('/auth/callback', async (req, res, next) => {
       orgIds: orgs.map((m) => m.orgId),
     })
     res.cookie(TOKEN_COOKIE, token, sessionCookieOptions())
-    res.redirect(302, postLoginRedirect(decodeState(req.query.state)))
+    res.redirect(302, postLoginRedirect(returnTo))
   } catch (err) {
     next(err)
   }

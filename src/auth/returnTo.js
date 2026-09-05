@@ -14,18 +14,25 @@ export function safeReturnPath(raw) {
   return raw
 }
 
-/** returnTo travels inside the OAuth state blob, base64url-encoded. */
-export function encodeState(returnTo) {
-  const payload = JSON.stringify({ r: safeReturnPath(returnTo) })
+/**
+ * The OAuth state blob, base64url-encoded. It carries the sanitized returnTo
+ * (`r`) and the login CSRF nonce (`n`) that must match the nonce cookie
+ * /auth/login set alongside it.
+ */
+export function encodeState(returnTo, nonce) {
+  const payload = JSON.stringify({ r: safeReturnPath(returnTo), n: nonce ?? null })
   return Buffer.from(payload, 'utf8').toString('base64url')
 }
 
 export function decodeState(state) {
   try {
-    const { r } = JSON.parse(Buffer.from(state, 'base64url').toString('utf8'))
-    return safeReturnPath(r)
+    const { r, n } = JSON.parse(Buffer.from(state, 'base64url').toString('utf8'))
+    return {
+      returnTo: safeReturnPath(r),
+      nonce: typeof n === 'string' && n.length > 0 ? n : null,
+    }
   } catch {
-    return '/'
+    return { returnTo: '/', nonce: null }
   }
 }
 
