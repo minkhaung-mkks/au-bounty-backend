@@ -19,15 +19,20 @@ export async function cookieAuth(req, res, next) {
   const payload = await verifySessionToken(token)
   if (!payload?.sub || !payload.role) return next()
 
+  req.user = userFromPayload(payload)
+  next()
+}
+
+/** Session-JWT payload -> the req.user / socket.data.user shape. */
+export function userFromPayload(payload) {
   const orgIds = Array.isArray(payload.orgIds) ? payload.orgIds : []
-  req.user = {
+  return {
     id: payload.sub,
     role: payload.role,
     name: payload.name ?? '',
     orgIds,
     isOrgMember: orgIds.length > 0,
   }
-  next()
 }
 
 export function requireUser(req, res, next) {

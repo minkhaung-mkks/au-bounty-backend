@@ -9,6 +9,7 @@ import { canOfferExtraCredit, canPostEvent, ownsTask } from '../middleware/autho
 import { badRequest, conflict, forbidden, notFound } from '../lib/errors.js'
 import { serializeTask, taskInclude } from '../lib/serialize.js'
 import { HOLDS_A_SPOT } from '../services/settle.js'
+import { emitTaskCreated, emitTaskUpdated } from '../realtime/emit.js'
 
 export const tasksRouter = Router()
 
@@ -191,6 +192,7 @@ tasksRouter.post('/tasks', requireUser, validate({ body: createBody }), async (r
     include: taskInclude,
   })
 
+  emitTaskCreated(task)
   res.status(201).json({ task: serializeTask(task, user, { withApplicants: true }) })
 })
 
@@ -222,6 +224,7 @@ tasksRouter.patch(
       data: scalars,
       include: taskInclude,
     })
+    await emitTaskUpdated(updated.id)
     res.json({ task: serializeTask(updated, req.user, { withApplicants: true }) })
   },
 )
@@ -237,6 +240,7 @@ tasksRouter.post('/tasks/:id/cancel', requireUser, validate({ params: idParam })
     data: { status: 'CANCELLED' },
     include: taskInclude,
   })
+  await emitTaskUpdated(updated.id)
   res.json({ task: serializeTask(updated, req.user, { withApplicants: true }) })
 })
 
@@ -273,5 +277,6 @@ tasksRouter.post('/tasks/:id/apply', requireUser, validate({ params: idParam }),
         data: { taskId: task.id, takerId: req.user.id, status },
       })
 
+  await emitTaskUpdated(task.id)
   res.status(201).json({ assignment })
 })

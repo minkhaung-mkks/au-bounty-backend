@@ -1,6 +1,7 @@
 import 'dotenv/config'
 import { createApp, API_PREFIX } from './app.js'
 import { prisma } from './lib/prisma.js'
+import { attachSockets } from './realtime/gateway.js'
 
 const port = Number(process.env.PORT) || 4000
 
@@ -13,9 +14,11 @@ async function start() {
     process.exit(1)
   }
 
-  createApp().listen(port, () => {
+  const server = createApp().listen(port, () => {
     console.log(`AU Bounty API on http://localhost:${port}${API_PREFIX}`)
   })
+  // Realtime rides the same HTTP server under its own path (D2).
+  attachSockets(server)
 }
 
 start()

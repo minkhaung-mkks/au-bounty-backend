@@ -1,4 +1,4 @@
-import { HOLDS_A_SPOT } from '../services/settle.js'
+import { occupancy } from './occupancy.js'
 
 export const userCard = (u) =>
   u && { id: u.id, name: u.name, role: u.role, universityId: u.universityId ?? null }
@@ -13,8 +13,18 @@ export const taskInclude = {
   },
 }
 
+/** Every field the Message model has, nothing more. */
+export const serializeMessage = (m) => ({
+  id: m.id,
+  assignmentId: m.assignmentId,
+  senderId: m.senderId,
+  content: m.content,
+  createdAt: m.createdAt,
+  readAt: m.readAt ?? null,
+})
+
 export function serializeTask(task, viewer, { withApplicants = false } = {}) {
-  const taken = task.assignments.filter((a) => HOLDS_A_SPOT.includes(a.status))
+  const { takenCount, spotsLeft } = occupancy(task)
   const mine = viewer ? task.assignments.find((a) => a.takerId === viewer.id) : null
   const isOwner = Boolean(viewer) && task.posterId === viewer.id
 
@@ -35,8 +45,8 @@ export function serializeTask(task, viewer, { withApplicants = false } = {}) {
     org: task.org ?? null,
     tags: task.tags.map((t) => ({ id: t.tag.id, name: t.tag.name, category: t.tag.category })),
     maxTakers: task.maxTakers,
-    takenCount: taken.length,
-    spotsLeft: Math.max(0, task.maxTakers - taken.length),
+    takenCount,
+    spotsLeft,
     isMine: isOwner,
     myAssignment: mine
       ? { id: mine.id, status: mine.status, completionRequestedAt: mine.completionRequestedAt }

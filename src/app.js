@@ -13,6 +13,7 @@ import { devRouter } from './routes/dev.js'
 import { tagsRouter } from './routes/tags.js'
 import { tasksRouter } from './routes/tasks.js'
 import { assignmentsRouter } from './routes/assignments.js'
+import { messagesRouter } from './routes/messages.js'
 import { reviewsRouter } from './routes/reviews.js'
 import { usersRouter } from './routes/users.js'
 
@@ -58,6 +59,7 @@ export function createApp() {
   api.use(tagsRouter)
   api.use(tasksRouter)
   api.use(assignmentsRouter)
+  api.use(messagesRouter)
   api.use(reviewsRouter)
   api.use(usersRouter)
 

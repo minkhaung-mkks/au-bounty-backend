@@ -6,6 +6,7 @@ import { requireUser } from '../middleware/auth.js'
 import { ownsTask } from '../middleware/authorize.js'
 import { badRequest, conflict, forbidden, notFound } from '../lib/errors.js'
 import { HOLDS_A_SPOT } from '../services/settle.js'
+import { emitTaskUpdated } from '../realtime/emit.js'
 
 export const assignmentsRouter = Router()
 
@@ -24,6 +25,9 @@ const step = (path, handler) =>
   assignmentsRouter.post(path, requireUser, validate({ params: idParam }), async (req, res) => {
     const assignment = await load(req.valid.params.id)
     const updated = await handler(assignment, req.user)
+    // Every transition here moves occupancy or status, so the task detail room
+    // hears about it from one place instead of five handlers.
+    await emitTaskUpdated(assignment.taskId)
     res.json({ assignment: updated })
   })
 

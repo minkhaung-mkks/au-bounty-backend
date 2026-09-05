@@ -1,8 +1,13 @@
 import { prisma } from '../lib/prisma.js'
+import { HOLDS_A_SPOT } from '../lib/occupancy.js'
+import { emitTaskUpdated } from '../realtime/emit.js'
 
 export const AUTO_CONFIRM_DAYS = 7
 export const REVIEW_PUBLISH_AFTER_BOTH_DAYS = 1
 export const REVIEW_PUBLISH_AFTER_ONE_DAYS = 7
+
+// Re-exported for the routes that already imported it from here.
+export { HOLDS_A_SPOT }
 
 const days = (n) => n * 24 * 60 * 60 * 1000
 const ago = (n) => new Date(Date.now() - days(n))
@@ -12,23 +17,27 @@ const ago = (n) => new Date(Date.now() - days(n))
  * background job. Nothing here depends on the API process having been alive when
  * the deadline passed, so a restart cannot lose a transition.
  *
- * Called once per request by settleMiddleware.
+ * Returns the ids of every task whose status or occupancy changed, so the caller
+ * can fan task:updated out to the detail rooms. Called once per request by
+ * settleMiddleware.
  */
 export async function settle() {
-  await autoConfirmCompletions()
-  await lockFullOrExpiredTasks()
-  await completeFinishedTasks()
+  const touched = new Set()
+  await autoConfirmCompletions(touched)
+  await lockFullOrExpiredTasks(touched)
+  await completeFinishedTasks(touched)
   await publishDueReviews()
+  return [...touched]
 }
 
 /** A poster who never responds cannot hold a helper's record hostage. */
-async function autoConfirmCompletions() {
+async function autoConfirmCompletions(touched) {
   const due = await prisma.taskAssignment.findMany({
     where: {
       status: 'PENDING_CONFIRMATION',
       completionRequestedAt: { lte: ago(AUTO_CONFIRM_DAYS) },
     },
-    select: { id: true, completionRequestedAt: true },
+    select: { id: true, taskId: true, completionRequestedAt: true },
   })
   for (const a of due) {
     await prisma.taskAssignment.update({
@@ -38,15 +47,23 @@ async function autoConfirmCompletions() {
         completedAt: new Date(a.completionRequestedAt.getTime() + days(AUTO_CONFIRM_DAYS)),
       },
     })
+    touched.add(a.taskId)
   }
 }
 
 /** OPEN means takeable. A task past its deadline or out of spots is LOCKED. */
-async function lockFullOrExpiredTasks() {
-  await prisma.task.updateMany({
+async function lockFullOrExpiredTasks(touched) {
+  const expired = await prisma.task.findMany({
     where: { status: 'OPEN', deadline: { lt: new Date() } },
-    data: { status: 'LOCKED' },
+    select: { id: true },
   })
+  if (expired.length) {
+    await prisma.task.updateMany({
+      where: { id: { in: expired.map((t) => t.id) } },
+      data: { status: 'LOCKED' },
+    })
+    expired.forEach((t) => touched.add(t.id))
+  }
 
   const open = await prisma.task.findMany({
     where: { status: 'OPEN' },
@@ -59,11 +76,12 @@ async function lockFullOrExpiredTasks() {
   const full = open.filter((t) => t.assignments.length >= t.maxTakers).map((t) => t.id)
   if (full.length) {
     await prisma.task.updateMany({ where: { id: { in: full } }, data: { status: 'LOCKED' } })
+    full.forEach((id) => touched.add(id))
   }
 }
 
 /** Every spot filled and every taker finished means the posting itself is done. */
-async function completeFinishedTasks() {
+async function completeFinishedTasks(touched) {
   const locked = await prisma.task.findMany({
     where: { status: 'LOCKED' },
     select: {
@@ -81,6 +99,7 @@ async function completeFinishedTasks() {
     .map((t) => t.id)
   if (done.length) {
     await prisma.task.updateMany({ where: { id: { in: done } }, data: { status: 'COMPLETED' } })
+    done.forEach((id) => touched.add(id))
   }
 }
 
@@ -124,12 +143,10 @@ async function publishDueReviews() {
   }
 }
 
-/** Assignment states that occupy one of the task's spots. */
-export const HOLDS_A_SPOT = ['ACCEPTED', 'IN_PROGRESS', 'PENDING_CONFIRMATION', 'COMPLETED']
-
 export async function settleMiddleware(req, res, next) {
   try {
-    await settle()
+    const touched = await settle()
+    for (const taskId of touched) await emitTaskUpdated(taskId)
   } catch (err) {
     // A settle failure must not take down a read. Log it and serve what we have.
     console.error('settle failed:', err)
