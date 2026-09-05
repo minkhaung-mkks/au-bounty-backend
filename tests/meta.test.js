@@ -1,6 +1,12 @@
-import { describe, test, expect } from 'vitest'
+import { describe, test, expect, beforeEach } from 'vitest'
 import request from 'supertest'
-import { appWith } from './helpers.js'
+import { appWith, resetDb } from './helpers.js'
+
+// /dev/users lists whatever is in the User table, so this file cannot depend
+// on which file vitest happened to schedule before it.
+beforeEach(async () => {
+  await resetDb()
+})
 
 describe('GET /meta', () => {
   test('reports the dev picker and an unconfigured entra block', async () => {

@@ -16,6 +16,10 @@ import { assignmentsRouter } from './routes/assignments.js'
 import { messagesRouter } from './routes/messages.js'
 import { reviewsRouter } from './routes/reviews.js'
 import { usersRouter } from './routes/users.js'
+import { filesRouter } from './routes/files.js'
+import { adminRouter } from './routes/admin.js'
+import { alertsRouter } from './routes/alerts.js'
+import { peerRouter } from './routes/peer.js'
 
 // Nginx will serve the built frontend at /aubounty and proxy this prefix through,
 // and the peer contract with SL Systems publishes /aubounty/api/peer/... , so the
@@ -49,6 +53,10 @@ export function createApp() {
   // Login/callback/logout answer for themselves, before user resolution.
   api.use(authRouter)
 
+  // The partner's inbound endpoint is its own security domain (x-api-key, not
+  // a user session), so it mounts ahead of the user-resolution middleware.
+  api.use(peerRouter)
+
   // Resolve who is asking: the session cookie always, the dev header only in
   // dev. Then bring any overdue state transitions up to date.
   api.use(cookieAuth)
@@ -62,6 +70,9 @@ export function createApp() {
   api.use(messagesRouter)
   api.use(reviewsRouter)
   api.use(usersRouter)
+  api.use(alertsRouter)
+  api.use(filesRouter)
+  api.use(adminRouter)
 
   app.use(API_PREFIX, api)
   app.use(notFoundHandler)

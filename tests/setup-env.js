@@ -6,7 +6,8 @@ const url = new URL(
   process.env.DATABASE_URL ?? 'postgresql://aubounty:aubounty@localhost:5433/aubounty',
 )
 url.pathname = '/aubounty_test'
-process.env.DATABASE_URL = url.toString()
+// TEST_DATABASE_URL pins the whole database for parallel workers in one checkout.
+process.env.DATABASE_URL = process.env.TEST_DATABASE_URL ?? url.toString()
 
 // Deterministic auth env; individual tests override what they care about.
 process.env.JWT_SECRET ??= 'test-jwt-secret-never-for-production'

@@ -17,5 +17,41 @@ services:
       timeout: 5s
       retries: 10
 
+  # S3-compatible object store for D5 attachments. Point the app at it with
+  # S3_ENDPOINT=http://localhost:9100, S3_BUCKET=aubounty and path-style on
+  # (the defaults in .env.example).
+  minio:
+    image: minio/minio
+    container_name: aubounty-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: aubounty
+      MINIO_ROOT_PASSWORD: aubounty
+    ports:
+      - "9100:9000"
+      - "9101:9001"
+    volumes:
+      - aubounty-minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # One-shot: create the bucket the app expects, then exit.
+  minio-init:
+    image: minio/mc
+    container_name: aubounty-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 aubounty aubounty &&
+      mc mb --ignore-existing local/aubounty
+      "
+
 volumes:
   aubounty-pgdata:
+  aubounty-minio-data:

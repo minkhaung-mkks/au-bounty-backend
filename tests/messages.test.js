@@ -4,7 +4,7 @@ import { prisma } from '../src/lib/prisma.js'
 import { appWith, createUser, resetDb, sessionCookie } from './helpers.js'
 
 const api = '/aubounty/api'
-const MESSAGE_FIELDS = ['id', 'assignmentId', 'senderId', 'content', 'createdAt', 'readAt']
+const MESSAGE_FIELDS = ['id', 'assignmentId', 'senderId', 'content', 'createdAt', 'readAt', 'attachments']
 
 beforeEach(async () => {
   await resetDb()

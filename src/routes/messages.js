@@ -117,11 +117,13 @@ messagesRouter.get(
       ]
     }
 
-    // Newest page first, then flipped to ascending for the client.
+    // Newest page first, then flipped to ascending for the client. Attachments
+    // ride along as metadata; the bytes move over presigned URLs (D5).
     const page = await prisma.message.findMany({
       where,
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: limit + 1,
+      include: { attachments: { orderBy: { createdAt: 'asc' } } },
     })
     const hasMore = page.length > limit
     const messages = page.slice(0, limit).reverse()

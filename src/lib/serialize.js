@@ -3,6 +3,15 @@ import { occupancy } from './occupancy.js'
 export const userCard = (u) =>
   u && { id: u.id, name: u.name, role: u.role, universityId: u.universityId ?? null }
 
+/** Attachment metadata; file bytes move over presigned URLs, never here. */
+export const serializeAttachment = (a) => ({
+  id: a.id,
+  fileName: a.fileName,
+  mimeType: a.mimeType,
+  sizeBytes: a.sizeBytes,
+  createdAt: a.createdAt,
+})
+
 export const taskInclude = {
   poster: { select: { id: true, name: true, role: true, universityId: true } },
   org: { select: { id: true, name: true } },
@@ -11,6 +20,7 @@ export const taskInclude = {
     include: { taker: { select: { id: true, name: true, role: true, universityId: true } } },
     orderBy: { appliedAt: 'asc' },
   },
+  attachments: { orderBy: { createdAt: 'asc' } },
 }
 
 /** Every field the Message model has, nothing more. */
@@ -21,6 +31,8 @@ export const serializeMessage = (m) => ({
   content: m.content,
   createdAt: m.createdAt,
   readAt: m.readAt ?? null,
+  // Only populated when the query included the message's own attachments.
+  attachments: (m.attachments ?? []).map(serializeAttachment),
 })
 
 export function serializeTask(task, viewer, { withApplicants = false } = {}) {
@@ -44,6 +56,7 @@ export function serializeTask(task, viewer, { withApplicants = false } = {}) {
     poster: userCard(task.poster),
     org: task.org ?? null,
     tags: task.tags.map((t) => ({ id: t.tag.id, name: t.tag.name, category: t.tag.category })),
+    attachments: (task.attachments ?? []).map(serializeAttachment),
     maxTakers: task.maxTakers,
     takenCount,
     spotsLeft,
