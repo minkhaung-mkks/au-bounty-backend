@@ -33,16 +33,6 @@ const tagBody = z.object({
   name: z.string().trim().min(1, 'Name cannot be empty.').max(40),
   category: z.enum(['LANGUAGE', 'ACADEMIC', 'PRACTICAL', 'ERRAND']),
 })
-// Query strings arrive as text; hidden is spelled out as an enum so "false"
-// survives, instead of coerce.boolean() reading it as true.
-const listUsersQuery = z.object({
-  q: z.string().trim().max(80).optional(),
-  role: z.enum(['STUDENT', 'TEACHER', 'ADMIN']).optional(),
-})
-const listReviewsQuery = z.object({
-  hidden: z.enum(['true', 'false']).transform((v) => v === 'true').optional(),
-  limit: z.coerce.number().int().min(1).max(100).default(50),
-})
 
 /** Only the fields the alert console renders; identity stays a card, not a row. */
 const serializeAlert = (a) => ({
@@ -58,27 +48,6 @@ const serializeAlert = (a) => ({
 })
 
 const alertInclude = { user: { select: { id: true, name: true, universityId: true } } }
-
-/* ------------------------------------------------------------- directory */
-
-// The role picker's search surface. SERVICE accounts are integration identity,
-// not people, so they never appear here regardless of filters.
-adminRouter.get('/admin/users', validate({ query: listUsersQuery }), async (req, res) => {
-  const { q, role } = req.valid.query
-  const where = { role: role ?? { not: 'SERVICE' } }
-  if (q) {
-    where.OR = ['name', 'email', 'universityId'].map((field) => ({
-      [field]: { contains: q, mode: 'insensitive' },
-    }))
-  }
-  const users = await prisma.user.findMany({
-    where,
-    orderBy: { createdAt: 'desc' },
-    take: 50,
-    select: { id: true, name: true, email: true, universityId: true, role: true, createdAt: true },
-  })
-  res.json({ users })
-})
 
 /* ------------------------------------------------------------------ roles */
 
@@ -103,37 +72,6 @@ adminRouter.patch(
 )
 
 /* ------------------------------------------------------------------- orgs */
-
-adminRouter.get('/admin/orgs', async (req, res) => {
-  const orgs = await prisma.organization.findMany({
-    include: { _count: { select: { memberships: true } } },
-    orderBy: { name: 'asc' },
-  })
-  res.json({
-    orgs: orgs.map((o) => ({
-      id: o.id,
-      name: o.name,
-      description: o.description,
-      memberCount: o._count.memberships,
-    })),
-  })
-})
-
-adminRouter.get('/admin/orgs/:id', validate({ params: idParam }), async (req, res) => {
-  const org = await prisma.organization.findUnique({
-    where: { id: req.valid.params.id },
-    include: { memberships: { include: { user: true }, orderBy: { user: { name: 'asc' } } } },
-  })
-  if (!org) throw notFound('No organization with that id.')
-  res.json({
-    org: { id: org.id, name: org.name, description: org.description },
-    members: org.memberships.map((m) => ({
-      userId: m.userId,
-      name: m.user.name,
-      position: m.position,
-    })),
-  })
-})
 
 adminRouter.post('/admin/orgs', validate({ body: orgBody }), async (req, res) => {
   let org
@@ -239,35 +177,6 @@ adminRouter.patch(
     res.json({ review })
   },
 )
-
-// The moderation queue: newest first, filterable to the hidden ones. Admins see
-// the raw text here — that is the point of reviewing what was hidden.
-adminRouter.get('/admin/reviews', validate({ query: listReviewsQuery }), async (req, res) => {
-  const { hidden, limit } = req.valid.query
-  const reviews = await prisma.review.findMany({
-    where: hidden === undefined ? undefined : { textHidden: hidden },
-    include: {
-      reviewer: { select: { id: true, name: true } },
-      reviewee: { select: { id: true, name: true } },
-      task: { select: { id: true, title: true } },
-    },
-    orderBy: { createdAt: 'desc' },
-    take: limit,
-  })
-  res.json({
-    reviews: reviews.map((r) => ({
-      id: r.id,
-      taskId: r.taskId,
-      taskTitle: r.task.title,
-      reviewer: r.reviewer,
-      reviewee: r.reviewee,
-      rating: r.rating,
-      text: r.text,
-      textHidden: r.textHidden,
-      createdAt: r.createdAt,
-    })),
-  })
-})
 
 /* ---------------------------------------------------------------- alerts */
 

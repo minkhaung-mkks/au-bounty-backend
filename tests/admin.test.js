@@ -21,7 +21,7 @@ beforeEach(async () => {
 const as = (user) => ({ 'x-dev-user-id': user.id })
 
 /** A published review hanging off a finished task, ready for moderation. */
-async function seedReview({ textHidden = false, createdAt } = {}) {
+async function seedReview({ textHidden = false } = {}) {
   const poster = await createUser({ name: 'Poster' })
   const task = await prisma.task.create({
     data: { title: 'Reviewed task', content: 'c', type: 'REQUEST', posterId: poster.id },
@@ -35,7 +35,6 @@ async function seedReview({ textHidden = false, createdAt } = {}) {
       text: 'Harsh but honest wording.',
       published: true,
       textHidden,
-      ...(createdAt && { createdAt }),
     },
   })
   return { poster, task, review }
@@ -55,17 +54,12 @@ async function seedAlert(overrides = {}) {
 // Every console endpoint refuses students and teachers before any lookup runs.
 const matrix = [
   ['patch', '/admin/users/:id/role', { role: 'TEACHER' }],
-  ['get', '/admin/users', null],
-  ['get', '/admin/users?q=abc&role=STUDENT', null],
   ['post', '/admin/orgs', { name: 'Matrix Org', description: '' }],
-  ['get', '/admin/orgs', null],
-  ['get', '/admin/orgs/:id', null],
   ['patch', '/admin/orgs/:id', { name: 'Matrix Org' }],
   ['post', '/admin/orgs/:id/members', { userId: '123e4567-e89b-12d3-a456-426614174000', position: 'Member' }],
   ['delete', '/admin/orgs/:id/members/123e4567-e89b-12d3-a456-426614174000', null],
   ['post', '/admin/tags', { name: 'Matrix', category: 'ACADEMIC' }],
   ['patch', '/admin/reviews/:id/hide-text', { hidden: true }],
-  ['get', '/admin/reviews?hidden=true', null],
   ['get', '/admin/alerts', null],
   ['patch', '/admin/alerts/:id', { status: 'RESOLVED' }],
 ]
@@ -82,69 +76,6 @@ describe('admin RBAC matrix', () => {
 
     const anon = await request(app)[method](`${api}${target}`).send(body)
     expect(anon.status).toBe(401)
-  })
-})
-
-/* ------------------------------------------------------------- directory */
-
-describe('GET /admin/users', () => {
-  test('lists newest first, excludes SERVICE, exact card shape', async () => {
-    const past = (mins) => new Date(Date.now() - mins * 60 * 1000)
-    const oldest = await createUser({ name: 'Alpha Dean', createdAt: past(60) })
-    await createUser({ name: 'Service Bot', role: 'SERVICE', createdAt: past(50) })
-    const newest = await createUser({ name: 'Fresh Arrival', createdAt: past(10) })
-
-    const res = await request(app).get(`${api}/admin/users`).set(as(admin))
-    expect(res.status).toBe(200)
-    expect(res.body.users.some((u) => u.role === 'SERVICE')).toBe(false)
-
-    const ids = res.body.users.map((u) => u.id)
-    expect(ids.indexOf(newest.id)).toBeLessThan(ids.indexOf(oldest.id))
-    // The whole page is strictly newest-first (the beforeEach fixtures sit
-    // above everyone timestamped into the past).
-    const times = res.body.users.map((u) => new Date(u.createdAt).getTime())
-    expect([...times].sort((a, b) => b - a)).toEqual(times)
-
-    // Exactly the console card, no bio or msadOid leaking through.
-    expect(Object.keys(res.body.users[0]).sort()).toEqual(
-      ['createdAt', 'email', 'id', 'name', 'role', 'universityId'].sort(),
-    )
-  })
-
-  test('q matches name, email, and universityId case-insensitively', async () => {
-    await createUser({ name: 'Somchai Jaidee', universityId: '6701234' })
-    await createUser({ name: 'Other', email: 'unique.hall@example.edu' })
-
-    const byName = await request(app).get(`${api}/admin/users?q=SOMCHAI`).set(as(admin))
-    expect(byName.body.users.map((u) => u.name)).toEqual(['Somchai Jaidee'])
-
-    const byEmail = await request(app).get(`${api}/admin/users?q=unique.hall`).set(as(admin))
-    expect(byEmail.body.users.map((u) => u.email)).toEqual(['unique.hall@example.edu'])
-
-    const byStudentId = await request(app).get(`${api}/admin/users?q=01234`).set(as(admin))
-    expect(byStudentId.body.users.map((u) => u.universityId)).toEqual(['6701234'])
-  })
-
-  test('role filter narrows the list', async () => {
-    const res = await request(app).get(`${api}/admin/users?role=TEACHER`).set(as(admin))
-    expect(res.status).toBe(200)
-    expect(res.body.users.length).toBeGreaterThan(0)
-    expect(res.body.users.every((u) => u.role === 'TEACHER')).toBe(true)
-
-    const badRole = await request(app).get(`${api}/admin/users?role=SERVICE`).set(as(admin))
-    expect(badRole.status).toBe(400)
-  })
-
-  test('caps the list at 50 rows', async () => {
-    await prisma.user.createMany({
-      data: Array.from({ length: 55 }, (_, i) => ({
-        name: `Bulk ${i}`,
-        email: `bulk.${i}@bulk.dev`,
-        role: 'STUDENT',
-      })),
-    })
-    const res = await request(app).get(`${api}/admin/users`).set(as(admin))
-    expect(res.body.users).toHaveLength(50)
   })
 })
 
@@ -304,58 +235,6 @@ describe('admin orgs', () => {
   })
 })
 
-describe('GET /admin/orgs', () => {
-  test('lists orgs by name with member counts', async () => {
-    const beta = await prisma.organization.create({ data: { name: 'Beta Club' } })
-    const alpha = await prisma.organization.create({
-      data: { name: 'Alpha Club', description: 'First' },
-    })
-    await prisma.orgMembership.create({ data: { orgId: alpha.id, userId: student.id } })
-    await prisma.orgMembership.create({ data: { orgId: alpha.id, userId: teacher.id } })
-    await prisma.orgMembership.create({ data: { orgId: beta.id, userId: admin.id } })
-
-    const res = await request(app).get(`${api}/admin/orgs`).set(as(admin))
-    expect(res.status).toBe(200)
-    expect(res.body.orgs).toEqual([
-      { id: alpha.id, name: 'Alpha Club', description: 'First', memberCount: 2 },
-      { id: beta.id, name: 'Beta Club', description: '', memberCount: 1 },
-    ])
-  })
-})
-
-describe('GET /admin/orgs/:id', () => {
-  test('shows the org with its members', async () => {
-    const org = await prisma.organization.create({
-      data: { name: 'Debate Club', description: 'Argues well.' },
-    })
-    await prisma.orgMembership.create({
-      data: { orgId: org.id, userId: student.id, position: 'President' },
-    })
-    await prisma.orgMembership.create({
-      data: { orgId: org.id, userId: teacher.id, position: 'Advisor' },
-    })
-
-    const res = await request(app).get(`${api}/admin/orgs/${org.id}`).set(as(admin))
-    expect(res.status).toBe(200)
-    expect(res.body.org).toEqual({
-      id: org.id,
-      name: 'Debate Club',
-      description: 'Argues well.',
-    })
-    expect(res.body.members).toHaveLength(2)
-    expect(res.body.members).toContainEqual({
-      userId: student.id,
-      name: 'Student Two',
-      position: 'President',
-    })
-
-    const missing = await request(app)
-      .get(`${api}/admin/orgs/123e4567-e89b-42d3-a456-426614174000`)
-      .set(as(admin))
-    expect(missing.status).toBe(404)
-  })
-})
-
 /* ------------------------------------------------------------------- tags */
 
 describe('POST /admin/tags', () => {
@@ -429,81 +308,6 @@ describe('PATCH /admin/reviews/:id/hide-text', () => {
       .set(as(admin))
       .send({ hidden: 'yes' })
     expect(notBoolean.status).toBe(400)
-  })
-})
-
-describe('GET /admin/reviews', () => {
-  test('lists newest first with pair cards and the hidden filter', async () => {
-    const oldest = await seedReview({ createdAt: new Date(Date.now() - 3 * 60 * 1000) })
-    const hidden = await seedReview({
-      textHidden: true,
-      createdAt: new Date(Date.now() - 2 * 60 * 1000),
-    })
-    const newest = await seedReview({ createdAt: new Date(Date.now() - 1 * 60 * 1000) })
-
-    const all = await request(app).get(`${api}/admin/reviews`).set(as(admin))
-    expect(all.status).toBe(200)
-    expect(all.body.reviews.map((r) => r.id)).toEqual([
-      newest.review.id,
-      hidden.review.id,
-      oldest.review.id,
-    ])
-    const row = all.body.reviews[0]
-    expect(row).toMatchObject({
-      id: newest.review.id,
-      taskId: newest.task.id,
-      taskTitle: 'Reviewed task',
-      rating: 2,
-      text: 'Harsh but honest wording.',
-      textHidden: false,
-    })
-    expect(row.reviewer).toEqual({ id: newest.poster.id, name: 'Poster' })
-    expect(row.reviewee).toEqual({ id: student.id, name: 'Student Two' })
-    expect(Object.keys(row).sort()).toEqual(
-      [
-        'createdAt',
-        'id',
-        'rating',
-        'reviewee',
-        'reviewer',
-        'taskTitle',
-        'taskId',
-        'text',
-        'textHidden',
-      ].sort(),
-    )
-
-    const onlyHidden = await request(app)
-      .get(`${api}/admin/reviews?hidden=true`)
-      .set(as(admin))
-    expect(onlyHidden.body.reviews.map((r) => r.id)).toEqual([hidden.review.id])
-    // The queue shows the raw text; that is what moderation acts on.
-    expect(onlyHidden.body.reviews[0].text).toBe('Harsh but honest wording.')
-
-    const onlyVisible = await request(app)
-      .get(`${api}/admin/reviews?hidden=false`)
-      .set(as(admin))
-    expect(onlyVisible.body.reviews.map((r) => r.id)).toEqual([
-      newest.review.id,
-      oldest.review.id,
-    ])
-  })
-
-  test('limit clamps the page and rejects nonsense', async () => {
-    await seedReview()
-    await seedReview()
-
-    const one = await request(app).get(`${api}/admin/reviews?limit=1`).set(as(admin))
-    expect(one.body.reviews).toHaveLength(1)
-
-    const overMax = await request(app).get(`${api}/admin/reviews?limit=101`).set(as(admin))
-    expect(overMax.status).toBe(400)
-
-    const nonsense = await request(app).get(`${api}/admin/reviews?limit=many`).set(as(admin))
-    expect(nonsense.status).toBe(400)
-
-    const badHidden = await request(app).get(`${api}/admin/reviews?hidden=maybe`).set(as(admin))
-    expect(badHidden.status).toBe(400)
   })
 })
 
