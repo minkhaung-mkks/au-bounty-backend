@@ -5,11 +5,13 @@ import { Prisma } from '@prisma/client'
 import { prisma } from '../lib/prisma.js'
 import { validate } from '../middleware/validate.js'
 import { requireUser } from '../middleware/auth.js'
-import { canOfferExtraCredit, canPostEvent, ownsTask } from '../middleware/authorize.js'
-import { badRequest, conflict, forbidden, notFound } from '../lib/errors.js'
+import { canManageCheckin, canOfferExtraCredit, canPostEvent, ownsTask } from '../middleware/authorize.js'
+import { ApiError, badRequest, conflict, forbidden, notFound } from '../lib/errors.js'
 import { serializeTask, taskInclude } from '../lib/serialize.js'
-import { HOLDS_A_SPOT } from '../services/settle.js'
+import { HOLDS_A_SPOT, settle } from '../services/settle.js'
 import { emitTaskCreated, emitTaskUpdated } from '../realtime/emit.js'
+import { STEP_SECONDS, currentCode, remainingSeconds, verify } from '../lib/totp.js'
+import { icsForTask } from '../lib/ics.js'
 
 export const tasksRouter = Router()
 
@@ -42,6 +44,8 @@ const createBody = z.object({
 })
 
 const patchBody = createBody.partial().omit({ type: true })
+
+const checkinBody = z.object({ code: z.string().trim().min(1).max(32) })
 
 const idParam = z.object({ id: z.uuid() })
 
@@ -137,7 +141,12 @@ tasksRouter.get('/tasks/:id', validate({ params: idParam }), async (req, res) =>
   })
   if (!task) throw notFound('No task with that id.')
 
-  const showApplicants = Boolean(req.user) && ownsTask(req.user, task)
+  // Applicants are the poster's (or an admin's) business. On events, whoever
+  // may validate attendance (the sponsoring org) also needs the roster with
+  // its check-in stamps.
+  const showApplicants =
+    Boolean(req.user) &&
+    (ownsTask(req.user, task) || (task.type === 'EVENT' && canManageCheckin(req.user, task)))
   res.json({ task: serializeTask(task, req.user, { withApplicants: showApplicants }) })
 })
 
@@ -280,3 +289,92 @@ tasksRouter.post('/tasks/:id/apply', requireUser, validate({ params: idParam }),
   await emitTaskUpdated(task.id)
   res.status(201).json({ assignment })
 })
+
+/* --------------------------------------------------------------- check-in */
+
+// The organizer side of D4: the code to project at the venue, derived from the
+// event's secret and rotating every 60 seconds.
+tasksRouter.get(
+  '/tasks/:id/checkin-code',
+  requireUser,
+  validate({ params: idParam }),
+  async (req, res) => {
+    const task = await prisma.task.findUnique({ where: { id: req.valid.params.id } })
+    if (!task || task.type !== 'EVENT') throw notFound('No event with that id.')
+    if (!canManageCheckin(req.user, task)) throw forbidden('Only the organizers can see the code.')
+    if (!task.checkinSecret) throw conflict('This event has no check-in secret.')
+
+    res.json({
+      code: currentCode(task.checkinSecret),
+      remainingSeconds: remainingSeconds(),
+      periodSeconds: STEP_SECONDS,
+    })
+  },
+)
+
+// The attendee side: a current code proves presence at the venue. A match is
+// attendance, so the RSVP (an ACCEPTED assignment) completes on the spot.
+tasksRouter.post(
+  '/tasks/:id/checkin',
+  requireUser,
+  validate({ params: idParam, body: checkinBody }),
+  async (req, res) => {
+    const task = await prisma.task.findUnique({
+      where: { id: req.valid.params.id },
+      include: { assignments: true },
+    })
+    if (!task || task.type !== 'EVENT') throw notFound('No event with that id.')
+
+    const mine = task.assignments.find((a) => a.takerId === req.user.id)
+    if (!mine || (mine.status !== 'ACCEPTED' && mine.status !== 'COMPLETED')) {
+      throw forbidden('Only accepted attendees can check in.')
+    }
+    if (mine.status === 'COMPLETED') throw conflict('You are already checked in.')
+
+    // The error never says how close a guess was, or whether it was early or
+    // late: one message for wrong and expired alike.
+    if (!task.checkinSecret || !verify(task.checkinSecret, req.valid.body.code)) {
+      throw new ApiError(400, 'BAD_CODE', 'That code is wrong or no longer current.')
+    }
+
+    const now = new Date()
+    const assignment = await prisma.taskAssignment.update({
+      where: { id: mine.id },
+      data: {
+        status: 'COMPLETED',
+        completedAt: now,
+        checkedInAt: now,
+        checkedInBy: req.user.id,
+      },
+    })
+
+    // Bring the task's own transitions (full -> LOCKED -> COMPLETED) current
+    // the way the next request's settle pass would, so the fan-out is not
+    // stale, then announce the new occupancy.
+    const touched = await settle()
+    for (const id of new Set([task.id, ...touched])) await emitTaskUpdated(id)
+    res.json({ assignment })
+  },
+)
+
+/* ---------------------------------------------------------------- calendar */
+
+// D12: an "add to calendar" file, hand-rolled per RFC 5545.
+tasksRouter.get(
+  '/tasks/:id/calendar.ics',
+  requireUser,
+  validate({ params: idParam }),
+  async (req, res) => {
+    const task = await prisma.task.findUnique({ where: { id: req.valid.params.id } })
+    if (!task || task.type !== 'EVENT') throw notFound('No event with that id.')
+
+    const ics = icsForTask(task)
+    if (!ics) throw badRequest('This event has no start time or deadline to put on a calendar.')
+
+    res.set({
+      'Content-Type': 'text/calendar; charset=utf-8',
+      'Content-Disposition': 'attachment; filename="aubounty-event.ics"',
+    })
+    res.send(ics)
+  },
+)

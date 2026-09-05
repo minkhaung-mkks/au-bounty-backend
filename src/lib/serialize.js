@@ -61,6 +61,9 @@ export function serializeTask(task, viewer, { withApplicants = false } = {}) {
       appliedAt: a.appliedAt,
       completionRequestedAt: a.completionRequestedAt,
       completedAt: a.completedAt,
+      // Event attendance stamps: who checked in and when.
+      checkedInAt: a.checkedInAt ?? null,
+      checkedInBy: a.checkedInBy ?? null,
       taker: userCard(a.taker),
     }))
   }

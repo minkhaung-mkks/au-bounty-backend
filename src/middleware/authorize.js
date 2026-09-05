@@ -13,6 +13,15 @@ export const canOfferExtraCredit = (user) => isTeacher(user) || isAdmin(user)
 /** You can edit, cancel and manage applicants on your own posts. Admins moderate anything. */
 export const ownsTask = (user, task) => task.posterId === user.id || isAdmin(user)
 
+/**
+ * Show the rotating check-in code and validate attendance (RBAC matrix row):
+ * the poster (a teacher's own events are covered here), members of the
+ * sponsoring org, and admins. Teachers do not get other people's events.
+ */
+export const canManageCheckin = (user, task) =>
+  Boolean(user) &&
+  (ownsTask(user, task) || (task.orgId != null && user.orgIds?.includes(task.orgId)))
+
 export const requireRole =
   (...roles) =>
   (req, res, next) => {
