@@ -3,6 +3,7 @@ import { createApp, API_PREFIX } from './app.js'
 import { prisma } from './lib/prisma.js'
 import { attachSockets } from './realtime/gateway.js'
 import { startAlertSweeper, stopAlertSweeper } from './services/alertSweeper.js'
+import { startMailScheduler, stopMailScheduler } from './services/mailScheduler.js'
 
 const port = Number(process.env.PORT) || 4000
 
@@ -22,14 +23,17 @@ async function start() {
   attachSockets(server)
   // Outbound alert forwarding retries (D6): an immediate pass, then every 30s.
   startAlertSweeper()
+  // Email triggers + retries (D8): an immediate pass, then every 60s.
+  startMailScheduler()
 
-  // Orderly shutdown: stop the sweeper before anything else so no pass fires
-  // mid-close, then let the server drain and release the db pool.
+  // Orderly shutdown: stop the background loops before anything else so no
+  // pass fires mid-close, then let the server drain and release the db pool.
   let closing = false
   const shutdown = () => {
     if (closing) return
     closing = true
     stopAlertSweeper()
+    stopMailScheduler()
     server.close(async () => {
       await prisma.$disconnect()
       process.exit(0)

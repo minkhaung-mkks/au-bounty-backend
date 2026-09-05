@@ -8,6 +8,8 @@ import { requireUser } from '../middleware/auth.js'
 import { canManageCheckin, canOfferExtraCredit, canPostEvent, ownsTask } from '../middleware/authorize.js'
 import { ApiError, badRequest, conflict, forbidden, notFound } from '../lib/errors.js'
 import { serializeTask, taskInclude } from '../lib/serialize.js'
+import { geocode, staticMapUrl } from '../lib/maps.js'
+import { translateTexts } from '../lib/translate.js'
 import { HOLDS_A_SPOT, settle } from '../services/settle.js'
 import { emitTaskCreated, emitTaskUpdated } from '../realtime/emit.js'
 import { STEP_SECONDS, currentCode, remainingSeconds, verify } from '../lib/totp.js'
@@ -34,7 +36,7 @@ const createBody = z.object({
   rewardDescription: z.string().trim().max(200).default(''),
   maxTakers: z.number().int().min(1).max(1000).default(1),
   acceptanceMode: z.enum(['AUTO', 'APPROVAL']).default('APPROVAL'),
-  locationName: z.string().trim().min(1).max(160),
+  locationName: z.string().trim().min(1).max(160).optional(),
   locationLat: z.number().min(-90).max(90).optional(),
   locationLng: z.number().min(-180).max(180).optional(),
   startsAt: z.coerce.date().optional(),
@@ -47,7 +49,48 @@ const patchBody = createBody.partial().omit({ type: true })
 
 const checkinBody = z.object({ code: z.string().trim().min(1).max(32) })
 
+const translateQuery = z.object({
+  lang: z
+    .string()
+    .trim()
+    .regex(/^[a-z]{2}$/i, 'lang must be a two-letter language code, e.g. th or en.'),
+})
+
 const idParam = z.object({ id: z.uuid() })
+
+/**
+ * D9 location resolution for create/edit. With a location name: geocode it
+ * (Google when keyed); when that yields nothing — no key, zero results, or an
+ * outage — explicit locationLat/locationLng are the fallback. A name that
+ * resolves through neither is the one case the proposal rejects. Without a
+ * name nothing is required. The static map URL is derived whenever a key
+ * exists, so the frontend swaps its placeholder only when it has a real URL.
+ */
+async function resolveLocation({ locationName = '', locationLat = null, locationLng = null }) {
+  let lat = locationLat
+  let lng = locationLng
+
+  if (locationName) {
+    const geocoded = await geocode(locationName)
+    if (geocoded) {
+      lat = geocoded.lat
+      lng = geocoded.lng
+    } else if (lat == null || lng == null) {
+      throw new ApiError(
+        400,
+        'LOCATION_UNRESOLVED',
+        'That location name could not be pinned on a map. Enter coordinates manually.',
+      )
+    }
+  }
+
+  return {
+    locationName,
+    locationLat: lat,
+    locationLng: lng,
+    mapUrl: staticMapUrl(lat, lng),
+  }
+}
 
 /* ------------------------------------------------------------------ board */
 
@@ -178,6 +221,7 @@ tasksRouter.post('/tasks', requireUser, validate({ body: createBody }), async (r
   const tags = await prisma.tag.findMany({ where: { id: { in: body.tagIds } } })
   if (tags.length !== body.tagIds.length) throw badRequest('One of those tags does not exist.')
 
+  const location = await resolveLocation(body)
   const task = await prisma.task.create({
     data: {
       title: body.title,
@@ -189,9 +233,10 @@ tasksRouter.post('/tasks', requireUser, validate({ body: createBody }), async (r
       rewardDescription: body.rewardDescription,
       maxTakers: body.maxTakers,
       acceptanceMode: body.acceptanceMode,
-      locationName: body.locationName,
-      locationLat: body.locationLat ?? null,
-      locationLng: body.locationLng ?? null,
+      locationName: location.locationName,
+      locationLat: location.locationLat,
+      locationLng: location.locationLng,
+      mapUrl: location.mapUrl,
       startsAt: body.startsAt ?? null,
       deadline: body.deadline ?? null,
       // Events verify attendance with a code derived from this secret.
@@ -222,10 +267,25 @@ tasksRouter.patch(
       throw forbidden('Extra-credit rewards are teacher-only.')
     }
 
-    const { tagIds, ...scalars } = body
+    const { tagIds, locationName, locationLat, locationLng, ...scalars } = body
     if (tagIds) {
       await prisma.taskTag.deleteMany({ where: { taskId: task.id } })
       await prisma.taskTag.createMany({ data: tagIds.map((tagId) => ({ taskId: task.id, tagId })) })
+    }
+
+    // Location edits run the same D9 resolution as create. A new locationName
+    // replaces the whole location (the old coordinates pin the old place); a
+    // coords-only edit fixes the pin without touching the name.
+    if (locationName !== undefined) {
+      Object.assign(scalars, await resolveLocation({ locationName, locationLat, locationLng }))
+    } else if (locationLat !== undefined || locationLng !== undefined) {
+      const lat = locationLat ?? task.locationLat
+      const lng = locationLng ?? task.locationLng
+      Object.assign(scalars, {
+        locationLat: lat,
+        locationLng: lng,
+        mapUrl: staticMapUrl(lat, lng),
+      })
     }
 
     const updated = await prisma.task.update({
@@ -376,5 +436,27 @@ tasksRouter.get(
       'Content-Disposition': 'attachment; filename="aubounty-event.ics"',
     })
     res.send(ics)
+  },
+)
+
+/* --------------------------------------------------------------- translate */
+
+// D10: the title and content of any task, into any two-letter language code.
+// Identity fallback keeps the response shape identical when the key is missing
+// or Google is unreachable; the frontend decides whether to show the control
+// from /meta's capabilities.translation flag.
+tasksRouter.post(
+  '/tasks/:id/translate',
+  requireUser,
+  validate({ params: idParam, query: translateQuery }),
+  async (req, res) => {
+    const task = await prisma.task.findUnique({ where: { id: req.valid.params.id } })
+    if (!task) throw notFound('No task with that id.')
+
+    const { values, translated } = await translateTexts(
+      [task.title, task.content],
+      req.valid.query.lang,
+    )
+    res.json({ title: values[0], content: values[1], translated })
   },
 )

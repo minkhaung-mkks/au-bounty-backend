@@ -52,7 +52,13 @@ export function serializeTask(task, viewer, { withApplicants = false } = {}) {
     deadline: task.deadline,
     externalRef: task.externalRef,
     reward: { type: task.rewardType, description: task.rewardDescription },
-    location: { name: task.locationName, lat: task.locationLat, lng: task.locationLng },
+    location: {
+      name: task.locationName,
+      lat: task.locationLat,
+      lng: task.locationLng,
+      // Static map thumbnail when maps are keyed; null keeps the placeholder.
+      mapUrl: task.mapUrl ?? null,
+    },
     poster: userCard(task.poster),
     org: task.org ?? null,
     tags: task.tags.map((t) => ({ id: t.tag.id, name: t.tag.name, category: t.tag.category })),

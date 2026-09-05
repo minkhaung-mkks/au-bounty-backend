@@ -9,6 +9,7 @@ export const CALLBACK_BASE = 'http://localhost:4000/aubounty/api'
 const TABLES = [
   'Attachment',
   'Message',
+  'EmailOutbox',
   'EmergencyAlert',
   'Review',
   'TaskAssignment',

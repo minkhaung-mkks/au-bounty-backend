@@ -20,6 +20,7 @@ import { filesRouter } from './routes/files.js'
 import { adminRouter } from './routes/admin.js'
 import { alertsRouter } from './routes/alerts.js'
 import { peerRouter } from './routes/peer.js'
+import { weatherRouter } from './routes/weather.js'
 
 // Nginx will serve the built frontend at /aubounty and proxy this prefix through,
 // and the peer contract with SL Systems publishes /aubounty/api/peer/... , so the
@@ -42,11 +43,18 @@ export function createApp() {
   const api = express.Router()
   api.get('/health', (req, res) => res.json({ ok: true, version: '0.5.0' }))
 
-  // Capability flag for the frontend: which sign-in paths exist right now.
+  // Capability flag for the frontend: which sign-in paths and integrations
+  // exist right now, so the UI degrades gracefully when a key is missing.
   api.get('/meta', (req, res) =>
     res.json({
       devAuth: isDevAuthEnabled(),
       auth: { provider: 'microsoft', configured: isEntraConfigured() },
+      capabilities: {
+        maps: Boolean(process.env.GOOGLE_MAPS_KEY),
+        translation: Boolean(process.env.GOOGLE_TRANSLATE_KEY),
+        weather: true, // Open-Meteo is keyless
+        files: true,
+      },
     }),
   )
 
@@ -70,6 +78,7 @@ export function createApp() {
   api.use(messagesRouter)
   api.use(reviewsRouter)
   api.use(usersRouter)
+  api.use(weatherRouter)
   api.use(alertsRouter)
   api.use(filesRouter)
   api.use(adminRouter)

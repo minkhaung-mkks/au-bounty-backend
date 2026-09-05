@@ -6,6 +6,7 @@ import { requireUser } from '../middleware/auth.js'
 import { ownsTask } from '../middleware/authorize.js'
 import { badRequest, conflict, forbidden, notFound } from '../lib/errors.js'
 import { HOLDS_A_SPOT } from '../services/settle.js'
+import { notifyCompletionRequested } from '../services/mailScheduler.js'
 import { emitTaskUpdated } from '../realtime/emit.js'
 
 export const assignmentsRouter = Router()
@@ -15,7 +16,7 @@ const idParam = z.object({ id: z.uuid() })
 async function load(id) {
   const assignment = await prisma.taskAssignment.findUnique({
     where: { id },
-    include: { task: { include: { assignments: true } }, taker: true },
+    include: { task: { include: { assignments: true, poster: true } }, taker: true },
   })
   if (!assignment) throw notFound('No assignment with that id.')
   return assignment
@@ -57,10 +58,16 @@ step('/assignments/:id/complete', async (a, user) => {
   if (!['ACCEPTED', 'IN_PROGRESS'].includes(a.status)) {
     throw conflict(`Cannot mark work done from ${a.status}.`)
   }
-  return prisma.taskAssignment.update({
+  const updated = await prisma.taskAssignment.update({
     where: { id: a.id },
     data: { status: 'PENDING_CONFIRMATION', completionRequestedAt: new Date() },
   })
+  // D8: one reminder to the poster, deduped by the outbox. A mail failure must
+  // never fail the completion request itself.
+  await notifyCompletionRequested({ ...updated, task: a.task, taker: a.taker }).catch((err) =>
+    console.warn(`completion email for assignment ${a.id} failed: ${err.message}`),
+  )
+  return updated
 })
 
 /* The poster confirms. If they never do, settle() confirms it after 7 days. */

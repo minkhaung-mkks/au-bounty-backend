@@ -10,22 +10,30 @@ beforeEach(async () => {
 
 describe('GET /meta', () => {
   test('reports the dev picker and an unconfigured entra block', async () => {
+    delete process.env.GOOGLE_MAPS_KEY
+    delete process.env.GOOGLE_TRANSLATE_KEY
     const app = appWith({ dev: true, entraSecret: '' })
     const res = await request(app).get('/aubounty/api/meta')
     expect(res.status).toBe(200)
     expect(res.body).toEqual({
       devAuth: true,
       auth: { provider: 'microsoft', configured: false },
+      capabilities: { maps: false, translation: false, weather: true, files: true },
     })
   })
 
   test('flips with the environment', async () => {
+    process.env.GOOGLE_MAPS_KEY = 'maps-test-key'
+    process.env.GOOGLE_TRANSLATE_KEY = 'translate-test-key'
     const app = appWith({ dev: false, entraSecret: 'secret-value' })
     const res = await request(app).get('/aubounty/api/meta')
     expect(res.body).toEqual({
       devAuth: false,
       auth: { provider: 'microsoft', configured: true },
+      capabilities: { maps: true, translation: true, weather: true, files: true },
     })
+    delete process.env.GOOGLE_MAPS_KEY
+    delete process.env.GOOGLE_TRANSLATE_KEY
   })
 })
 

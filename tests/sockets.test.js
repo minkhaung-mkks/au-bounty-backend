@@ -243,6 +243,8 @@ describe('task and emergency fan-out', () => {
         content: 'Medication lost near the canteen',
         type: 'EMERGENCY',
         locationName: 'Canteen',
+        locationLat: 13.6128,
+        locationLng: 100.7146,
         maxTakers: 1,
         tagIds: [tag.id],
       })
@@ -268,6 +270,8 @@ describe('task and emergency fan-out', () => {
         acceptanceMode: 'AUTO',
         maxTakers: 2,
         locationName: 'Dorm A',
+        locationLat: 13.6135,
+        locationLng: 100.7152,
         tagIds: [tag.id],
       })
     const taskId = created.body.task.id
@@ -299,6 +303,8 @@ describe('task and emergency fan-out', () => {
         acceptanceMode: 'AUTO',
         maxTakers: 1,
         locationName: 'Library',
+        locationLat: 13.6119,
+        locationLng: 100.7131,
         tagIds: [tag.id],
       })
     const taskId = created.body.task.id

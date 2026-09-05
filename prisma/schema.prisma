@@ -247,6 +247,24 @@ model Attachment {
   // Prisma cannot model; it lives in the migration SQL, not here.
 }
 
+// D8: one row per outbound notification email. (kind, refId) is the trigger
+// identity — a unique violation means the email already went out (or is
+// queued), so a trigger can never double-send. sentAt stays null until a
+// transport succeeds; the mail scheduler retries those rows.
+model EmailOutbox {
+  id        String   @id @default(uuid()) @db.Uuid
+  kind      String
+  refId     String   @db.Uuid
+  toEmail   String
+  subject   String
+  body      String
+  sentAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@unique([kind, refId])
+  @@index([sentAt, createdAt])
+}
+
 model EmergencyAlert {
   id              String      @id @default(uuid()) @db.Uuid
   userId          String      @db.Uuid
