@@ -2,7 +2,7 @@ import { Router } from 'express'
 import { z } from 'zod'
 import { prisma } from '../lib/prisma.js'
 import { validate } from '../middleware/validate.js'
-import { requireUser } from '../middleware/devAuth.js'
+import { requireUser } from '../middleware/auth.js'
 import { badRequest, conflict, forbidden, notFound } from '../lib/errors.js'
 
 export const reviewsRouter = Router()

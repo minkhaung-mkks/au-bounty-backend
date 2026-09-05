@@ -2,8 +2,8 @@ import { Router } from 'express'
 import { z } from 'zod'
 import { prisma } from '../lib/prisma.js'
 import { validate } from '../middleware/validate.js'
-import { requireUser } from '../middleware/devAuth.js'
-import { notFound } from '../lib/errors.js'
+import { requireUser } from '../middleware/auth.js'
+import { conflict, notFound, unauthorized } from '../lib/errors.js'
 import { serializeTask, taskInclude, userCard } from '../lib/serialize.js'
 
 export const usersRouter = Router()
@@ -35,22 +35,69 @@ async function statsFor(userId) {
 /* ------------------------------------------------------------------- me */
 
 usersRouter.get('/me', requireUser, async (req, res) => {
+  // The session carries only { id, role, name, orgIds }; the profile needs the
+  // fresh row anyway so bio/universityId edits show without a re-login.
+  const user = await prisma.user.findUnique({
+    where: { id: req.user.id },
+    include: { memberships: { include: { org: true } } },
+  })
+  if (!user) throw unauthorized('Session points at a deleted user.')
+
   const [tags, stats] = await Promise.all([
-    prisma.userTag.findMany({ where: { userId: req.user.id }, include: { tag: true } }),
-    statsFor(req.user.id),
+    prisma.userTag.findMany({ where: { userId: user.id }, include: { tag: true } }),
+    statsFor(user.id),
   ])
   res.json({
     user: {
-      ...userCard(req.user),
-      email: req.user.email,
-      bio: req.user.bio,
-      createdAt: req.user.createdAt,
+      ...userCard(user),
+      email: user.email,
+      bio: user.bio,
+      createdAt: user.createdAt,
     },
-    orgs: req.user.memberships.map((m) => ({ ...m.org, position: m.position })),
+    orgs: user.memberships.map((m) => ({ ...m.org, position: m.position })),
     tags: tags.map((t) => t.tag),
     stats,
   })
 })
+
+/**
+ * Self-service profile edits. universityId is identity: settable exactly once,
+ * and afterwards immutable even by resubmitting the same value differently.
+ */
+usersRouter.put(
+  '/me',
+  requireUser,
+  validate({
+    body: z.object({
+      bio: z.string().max(1000, 'Bio tops out at 1000 characters.').nullable().optional(),
+      universityId: z.string().trim().min(3, 'Too short for a student id.').max(32).optional(),
+    }),
+  }),
+  async (req, res) => {
+    const { bio, universityId } = req.valid.body
+    const user = await prisma.user.findUnique({ where: { id: req.user.id } })
+    if (!user) throw unauthorized('Session points at a deleted user.')
+
+    if (universityId !== undefined && user.universityId !== null && user.universityId !== universityId) {
+      throw conflict('universityId is already set and cannot be changed.')
+    }
+
+    let updated
+    try {
+      updated = await prisma.user.update({
+        where: { id: user.id },
+        data: { bio, universityId },
+      })
+    } catch (err) {
+      if (err?.code === 'P2002') throw conflict('That universityId belongs to someone else.')
+      throw err
+    }
+
+    res.json({
+      user: { ...userCard(updated), email: updated.email, bio: updated.bio, createdAt: updated.createdAt },
+    })
+  },
+)
 
 usersRouter.put(
   '/me/tags',

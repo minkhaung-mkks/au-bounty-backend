@@ -1,0 +1,119 @@
+import { Router } from 'express'
+import { prisma } from '../lib/prisma.js'
+import { ENTRA_SCOPES, isEntraConfigured, msalClient, redirectUri } from '../auth/entra.js'
+import { decodeState, encodeState, postLoginRedirect } from '../auth/returnTo.js'
+import { TOKEN_COOKIE, sessionCookieOptions, signSessionToken } from '../auth/session.js'
+
+export const authRouter = Router()
+
+const notConfigured = (res) => res.status(503).json({ error: 'auth not configured' })
+
+/* ------------------------------------------------------------------ login */
+
+authRouter.get('/auth/login', async (req, res, next) => {
+  if (!isEntraConfigured()) return notConfigured(res)
+  try {
+    // returnTo rides through Microsoft inside the state blob, sanitized first:
+    // an attacker-supplied absolute URL must never become our redirect target.
+    const url = await msalClient().getAuthCodeUrl({
+      scopes: ENTRA_SCOPES,
+      redirectUri: redirectUri(),
+      state: encodeState(req.query.returnTo),
+    })
+    res.redirect(302, url)
+  } catch (err) {
+    next(err)
+  }
+})
+
+/* --------------------------------------------------------------- callback */
+
+authRouter.get('/auth/callback', async (req, res, next) => {
+  if (!isEntraConfigured()) return notConfigured(res)
+  try {
+    if (req.query.error) {
+      return res.status(401).json({
+        error: { code: 'AUTH_FAILED', message: String(req.query.error_description ?? req.query.error) },
+      })
+    }
+
+    const result = await msalClient().acquireTokenByCode({
+      code: String(req.query.code ?? ''),
+      redirectUri: redirectUri(),
+      scopes: ENTRA_SCOPES,
+    })
+
+    const user = await upsertMicrosoftUser(result)
+    const orgs = await prisma.orgMembership.findMany({
+      where: { userId: user.id },
+      select: { orgId: true },
+    })
+
+    const token = await signSessionToken({
+      id: user.id,
+      role: user.role,
+      name: user.name,
+      orgIds: orgs.map((m) => m.orgId),
+    })
+    res.cookie(TOKEN_COOKIE, token, sessionCookieOptions())
+    res.redirect(302, postLoginRedirect(decodeState(req.query.state)))
+  } catch (err) {
+    next(err)
+  }
+})
+
+/**
+ * Maps an id_token to our User table. oid is the stable key; name and email
+ * follow whatever the directory says today. No Microsoft tokens are stored.
+ */
+async function upsertMicrosoftUser(result) {
+  const claims = result.idTokenClaims ?? {}
+  const oid = claims.oid ?? result.uniqueId
+  if (!oid) throw new Error('id_token carried no oid claim.')
+
+  const name = claims.name ?? claims.preferred_username ?? claims.email ?? 'Microsoft user'
+  const email =
+    claims.preferred_username ?? claims.email ?? `${oid}@unset.au-bounty.invalid`
+  const universityId = claims.employeeId ?? claims.extension_employeeId ?? null
+
+  const existing = await prisma.user.findUnique({ where: { msadOid: oid } })
+  if (existing) {
+    return prisma.user.update({
+      where: { id: existing.id },
+      data: {
+        name,
+        email,
+        // A claim-sourced universityId only fills an empty slot, never moves
+        // one that was already claimed (same set-once rule as PUT /me).
+        ...(existing.universityId === null && universityId ? { universityId } : {}),
+      },
+    })
+  }
+
+  try {
+    return await prisma.user.create({
+      data: { msadOid: oid, name, email, universityId, role: 'STUDENT' },
+    })
+  } catch (err) {
+    // The directory email matched a user created some other way (seed, peer
+    // import). Claim that row rather than failing the sign-in.
+    if (err?.code === 'P2002') {
+      const byEmail = await prisma.user.findUnique({ where: { email } })
+      if (byEmail && byEmail.msadOid === null) {
+        return prisma.user.update({
+          where: { id: byEmail.id },
+          data: { msadOid: oid, name, universityId: byEmail.universityId ?? universityId },
+        })
+      }
+    }
+    throw err
+  }
+}
+
+/* ------------------------------------------------------------------ logout */
+
+authRouter.get('/auth/logout', (req, res) => {
+  const { path, ...options } = sessionCookieOptions()
+  res.clearCookie(TOKEN_COOKIE, { path, ...options })
+  res.status(204).end()
+})

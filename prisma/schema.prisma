@@ -138,6 +138,7 @@ model Task {
   tags        TaskTag[]
 
   @@index([type, status, createdAt])
+  @@index([posterId])
 }
 
 model TaskAssignment {
@@ -175,6 +176,9 @@ model Review {
   task     Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
   reviewer User @relation("ReviewAuthor", fields: [reviewerId], references: [id], onDelete: Cascade)
   reviewee User @relation("ReviewSubject", fields: [revieweeId], references: [id], onDelete: Cascade)
+
+  // rating BETWEEN 1 AND 5 is enforced by a CHECK constraint that Prisma
+  // cannot model; it lives in the migration SQL, not here.
 
   @@unique([taskId, reviewerId, revieweeId])
   @@index([revieweeId, published])
@@ -220,6 +224,8 @@ model Message {
   assignment  TaskAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
   sender      User           @relation(fields: [senderId], references: [id], onDelete: Cascade)
   attachments Attachment[]
+
+  @@index([assignmentId, createdAt])
 }
 
 model Attachment {
@@ -236,6 +242,9 @@ model Attachment {
   uploader User     @relation(fields: [uploaderId], references: [id], onDelete: Cascade)
   task     Task?    @relation(fields: [taskId], references: [id], onDelete: Cascade)
   message  Message? @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  // Exactly one of taskId / messageId is enforced by a CHECK constraint that
+  // Prisma cannot model; it lives in the migration SQL, not here.
 }
 
 model EmergencyAlert {
@@ -250,4 +259,6 @@ model EmergencyAlert {
   resolvedAt      DateTime?
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([status, createdAt])
 }
