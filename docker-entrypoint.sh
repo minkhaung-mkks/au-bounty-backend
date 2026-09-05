@@ -49,4 +49,25 @@ attempt()
 echo "docker-entrypoint: applying prisma migrations"
 ./node_modules/.bin/prisma migrate deploy
 
+# SEED_ON_BOOT=1 seeds demo data, but only into an empty database (no users),
+# so restarts never wipe or duplicate an existing dataset.
+if [ "${SEED_ON_BOOT:-0}" = "1" ]; then
+  echo "docker-entrypoint: SEED_ON_BOOT=1, checking whether seed data is needed"
+  node --input-type=module -e '
+  import { PrismaPg } from "@prisma/adapter-pg"
+  import { PrismaClient } from "@prisma/client"
+  const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL })
+  const prisma = new PrismaClient({ adapter })
+  const n = await prisma.user.count()
+  if (n === 0) {
+    console.log("docker-entrypoint: empty database, running seed")
+    await import("./prisma/seed.js")
+    console.log("docker-entrypoint: seed complete")
+  } else {
+    console.log("docker-entrypoint: database already has users, skipping seed")
+  }
+  await prisma.$disconnect()
+  ' || exit 1
+fi
+
 exec "$@"
