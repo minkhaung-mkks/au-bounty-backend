@@ -132,7 +132,25 @@ describe('POST /tasks location resolution', () => {
   test('no locationName means nothing is required', async () => {
     const res = await create({ title: 'Deliver a parcel', locationName: undefined })
     expect(res.status).toBe(201)
-    expect(res.body.task.location).toEqual({ name: '', lat: null, lng: null, mapUrl: null })
+    expect(res.body.task.location).toEqual({ name: null, lat: null, lng: null, mapUrl: null })
+  })
+
+  test('an empty locationName is a remote posting, not a validation error', async () => {
+    const res = await create({ title: 'Review my resume', locationName: '' })
+    expect(res.status).toBe(201)
+    expect(res.body.task.location).toEqual({ name: null, lat: null, lng: null, mapUrl: null })
+  })
+
+  test('supplied coordinates outrank the geocoded name', async () => {
+    setEnv('GOOGLE_MAPS_KEY', 'maps-test-key')
+    const fetchMock = vi.fn(async () => geocodeOk(13.6128, 100.7146))
+    vi.stubGlobal('fetch', fetchMock)
+
+    // The pin the poster dropped, nowhere near what the name geocodes to.
+    const res = await create({ locationName: 'Canteen B', locationLat: 13.7, locationLng: 100.5 })
+    expect(res.status).toBe(201)
+    expect(res.body.task.location).toMatchObject({ name: 'Canteen B', lat: 13.7, lng: 100.5 })
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   test('half a coordinate pair fails validation', async () => {
@@ -171,6 +189,16 @@ describe('PATCH /tasks location edit', () => {
       .send({ locationLat: 13.61, locationLng: 100.71 })
     expect(res.status).toBe(200)
     expect(res.body.task.location).toEqual({ name: 'Dorm A', lat: 13.61, lng: 100.71, mapUrl: null })
+  })
+
+  test('an empty locationName clears the location', async () => {
+    const created = await create({ locationName: 'Dorm A', locationLat: 13.6135, locationLng: 100.7152 })
+    const res = await request(app)
+      .patch(`${api}/tasks/${created.body.task.id}`)
+      .set(dev(poster))
+      .send({ locationName: '' })
+    expect(res.status).toBe(200)
+    expect(res.body.task.location).toEqual({ name: null, lat: null, lng: null, mapUrl: null })
   })
 
   test('editing the name without resolvable coordinates is 400 LOCATION_UNRESOLVED', async () => {

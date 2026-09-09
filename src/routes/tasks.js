@@ -36,7 +36,9 @@ const createBody = z.object({
   rewardDescription: z.string().trim().max(200).default(''),
   maxTakers: z.number().int().min(1).max(1000).default(1),
   acceptanceMode: z.enum(['AUTO', 'APPROVAL']).default('APPROVAL'),
-  locationName: z.string().trim().min(1).max(160).optional(),
+  // Optional and blankable: a remote or location-less posting sends nothing,
+  // and an edit clears a location by sending an empty string.
+  locationName: z.string().trim().max(160).optional(),
   locationLat: z.number().min(-90).max(90).optional(),
   locationLng: z.number().min(-180).max(180).optional(),
   startsAt: z.coerce.date().optional(),
@@ -76,16 +78,23 @@ const translateQuery = z.object({
 const idParam = z.object({ id: z.uuid() })
 
 /**
- * D9 location resolution for create/edit. With a location name: geocode it
- * (Google when keyed); when that yields nothing — no key, zero results, or an
- * outage — explicit locationLat/locationLng are the fallback. A name that
- * resolves through neither is the one case the proposal rejects. Without a
- * name nothing is required. The static map URL is derived whenever a key
+ * D9 location resolution for create/edit. Explicit coordinates win outright:
+ * a map-picked or typed pin is stored as given and the name is never geocoded
+ * over it. With only a name, geocode it (Google when keyed); a name that
+ * resolves through neither geocoding nor coordinates is the one case the
+ * proposal rejects. Without a name nothing is required. The static map URL is derived whenever a key
  * exists, so the frontend swaps its placeholder only when it has a real URL.
  */
 async function resolveLocation({ locationName = '', locationLat = null, locationLng = null }) {
   let lat = locationLat
   let lng = locationLng
+
+  // A pin the poster placed themselves outranks the name: the map picker sends
+  // both, and geocoding the name on top of it would silently drag the pin off
+  // the spot they clicked.
+  if (lat != null && lng != null) {
+    return { locationName, locationLat: lat, locationLng: lng, mapUrl: staticMapUrl(lat, lng) }
+  }
 
   if (locationName) {
     const geocoded = await geocode(locationName)

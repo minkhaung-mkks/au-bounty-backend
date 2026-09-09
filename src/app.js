@@ -27,7 +27,7 @@ import { weatherRouter } from './routes/weather.js'
 // prefix is baked in rather than added at deploy time.
 export const API_PREFIX = '/aubounty/api'
 
-export const isDevAuthEnabled = () => process.env.DEV_AUTH === '1'
+export const isDevAuthEnabled = () => process.env.DEV_AUTH == '1'
 
 export function createApp() {
   const app = express()

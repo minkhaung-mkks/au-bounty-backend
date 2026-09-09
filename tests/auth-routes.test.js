@@ -108,7 +108,46 @@ describe('GET /auth/login', () => {
 })
 
 describe('GET /auth/callback', () => {
-  test('a new msadOid creates a STUDENT user and sets the session cookie', async () => {
+  test('a u####### address signs in as a STUDENT with the id already filled', async () => {
+    const app = appWith({ entraSecret: 'secret-value' })
+    msal.acquireTokenByCode.mockResolvedValue({
+      uniqueId: 'oid-student',
+      idTokenClaims: {
+        oid: 'oid-student',
+        name: 'Somchai P',
+        preferred_username: 'u6712164@au.edu',
+      },
+    })
+
+    const login = await beginLogin(app)
+    const res = await callbackWith(app, login)
+    expect(res.status).toBe(302)
+
+    // The whole point: the profile form never has to ask for this.
+    const user = await prisma.user.findUnique({ where: { msadOid: 'oid-student' } })
+    expect(user).toMatchObject({ role: 'STUDENT', universityId: '6712164' })
+  })
+
+  test('an employeeId claim outranks the address pattern', async () => {
+    const app = appWith({ entraSecret: 'secret-value' })
+    msal.acquireTokenByCode.mockResolvedValue({
+      uniqueId: 'oid-claim',
+      idTokenClaims: {
+        oid: 'oid-claim',
+        name: 'Somsri T',
+        preferred_username: 'u6700001@au.edu',
+        employeeId: '9999999',
+      },
+    })
+
+    const login = await beginLogin(app)
+    await callbackWith(app, login)
+
+    const user = await prisma.user.findUnique({ where: { msadOid: 'oid-claim' } })
+    expect(user.universityId).toBe('9999999')
+  })
+
+  test('a new msadOid creates the user and sets the session cookie', async () => {
     const app = appWith({ entraSecret: 'secret-value' })
     msal.acquireTokenByCode.mockResolvedValue({
       uniqueId: 'oid-new',
@@ -121,11 +160,12 @@ describe('GET /auth/callback', () => {
     expect(res.status).toBe(302)
     expect(res.headers.location).toBe('/')
 
+    // A named au.edu address is staff, and staff carry no student id.
     const user = await prisma.user.findUnique({ where: { msadOid: 'oid-new' } })
     expect(user).toMatchObject({
       name: 'Jane Doe',
       email: 'jane@au.edu',
-      role: 'STUDENT',
+      role: 'TEACHER',
       universityId: null,
     })
 
@@ -147,7 +187,7 @@ describe('GET /auth/callback', () => {
       .get('/aubounty/api/me')
       .set('Cookie', cookie.split(';')[0])
     expect(me.status).toBe(200)
-    expect(me.body.user).toMatchObject({ name: 'Jane Doe', role: 'STUDENT' })
+    expect(me.body.user).toMatchObject({ name: 'Jane Doe', role: 'TEACHER' })
   })
 
   test('an existing msadOid reuses the row and updates changed name/email', async () => {

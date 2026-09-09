@@ -123,7 +123,7 @@ describe('POST /peer/emergency-tasks', () => {
     expect(bare.body.task).toMatchObject({
       maxTakers: 5,
       reward: { type: 'NONE', description: '' },
-      location: { name: '', lat: null, lng: null },
+      location: { name: null, lat: null, lng: null },
     })
   })
 

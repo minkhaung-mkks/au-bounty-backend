@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { prisma } from '../lib/prisma.js'
 import { ENTRA_SCOPES, isEntraConfigured, msalClient, redirectUri } from '../auth/entra.js'
+import { identityFromEmail } from '../auth/auIdentity.js'
 import { parseCookies } from '../auth/cookies.js'
 import { decodeState, encodeState, postLoginRedirect } from '../auth/returnTo.js'
 import {
@@ -102,6 +103,10 @@ authRouter.get('/auth/callback', async (req, res, next) => {
 /**
  * Maps an id_token to our User table. oid is the stable key; name and email
  * follow whatever the directory says today. No Microsoft tokens are stored.
+ *
+ * Role and student id come from the AU address shape when the directory does
+ * not publish an employeeId claim, so u6712164@au.edu signs in as a STUDENT
+ * carrying 6712164 and never sees the "set once" form.
  */
 async function upsertMicrosoftUser(result) {
   const claims = result.idTokenClaims ?? {}
@@ -111,7 +116,11 @@ async function upsertMicrosoftUser(result) {
   const name = claims.name ?? claims.preferred_username ?? claims.email ?? 'Microsoft user'
   const email =
     claims.preferred_username ?? claims.email ?? `${oid}@unset.au-bounty.invalid`
-  const universityId = claims.employeeId ?? claims.extension_employeeId ?? null
+  // A real directory claim outranks the address pattern; the pattern is the
+  // fallback, and both leave the set-once rule below untouched.
+  const derived = identityFromEmail(email)
+  const universityId =
+    claims.employeeId ?? claims.extension_employeeId ?? derived.universityId
 
   const existing = await prisma.user.findUnique({ where: { msadOid: oid } })
   if (existing) {
@@ -129,12 +138,19 @@ async function upsertMicrosoftUser(result) {
 
   try {
     return await prisma.user.create({
-      data: { msadOid: oid, name, email, universityId, role: 'STUDENT' },
+      data: { msadOid: oid, name, email, universityId, role: derived.role },
     })
   } catch (err) {
     // The directory email matched a user created some other way (seed, peer
     // import). Claim that row rather than failing the sign-in.
     if (err?.code === 'P2002') {
+      // A derived id someone else already owns must not cost anyone their
+      // sign-in: drop it and let the profile form claim one by hand.
+      if (String(err?.meta?.target ?? '').includes('universityId')) {
+        return prisma.user.create({
+          data: { msadOid: oid, name, email, role: derived.role },
+        })
+      }
       const byEmail = await prisma.user.findUnique({ where: { email } })
       if (byEmail && byEmail.msadOid === null) {
         return prisma.user.update({

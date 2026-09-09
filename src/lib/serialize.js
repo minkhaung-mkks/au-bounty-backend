@@ -53,7 +53,8 @@ export function serializeTask(task, viewer, { withApplicants = false } = {}) {
     externalRef: task.externalRef,
     reward: { type: task.rewardType, description: task.rewardDescription },
     location: {
-      name: task.locationName,
+      // Blank means the posting has no location; null so callers can fall back.
+      name: task.locationName || null,
       lat: task.locationLat,
       lng: task.locationLng,
       // Static map thumbnail when maps are keyed; null keeps the placeholder.
