@@ -31,9 +31,8 @@ export async function emitTaskUpdated(taskId) {
 }
 
 /**
- * The single hook for task creation. Every path that creates a task (the REST
- * route today, the peer inbound endpoint later) calls this, so an EMERGENCY
- * broadcast can never be forgotten by a new creation point.
+ * The single hook for task creation. Every path that creates a task calls this,
+ * so an EMERGENCY broadcast can never be forgotten by a new creation point.
  */
 export function emitTaskCreated(task) {
   const io = getIo()

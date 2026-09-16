@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto'
 import { prisma } from '../src/lib/prisma.js'
+import { seedAdmins } from './seedAdmins.js'
 
 // Every seeded event gets its own unpredictable attendance secret at seed
 // time, exactly like the create route does for real events.
@@ -69,9 +70,9 @@ async function main() {
   const studentFive = await mk('Student Five', 'student.five@example.edu', '6700005', 'STUDENT', null)
   const studentSix = await mk('Student Six', 'student.six@example.edu', '6700006', 'STUDENT', null)
 
-  // Owns tasks created by the partner alert system. No interactive login.
-  const service = await mk('Partner Alert System', 'service@sl-systems.example', null, 'SERVICE',
-    'Peer API service account.')
+  // Owns emergency tasks posted on behalf of campus safety. No interactive login.
+  const service = await mk('Campus Safety', 'safety@example.edu', null, 'SERVICE',
+    'Service account. Not a person; nobody signs in as one.')
 
   await prisma.orgMembership.create({
     data: { userId: orgMember.id, orgId: orgA.id, position: 'Events lead' },
@@ -275,15 +276,13 @@ async function main() {
     ['Research'],
   )
 
-  // --- Emergencies. One arrived through the peer API, one was posted by a student.
+  // --- Emergencies. One from the campus safety account, one posted by a student.
   await task(
     {
       title: 'Emergency task A',
-      content:
-        'Placeholder emergency created by the partner alert system through the peer API. Deduplicated on externalRef.',
+      content: 'Placeholder emergency posted by the campus safety account.',
       type: 'EMERGENCY',
       posterId: service.id,
-      externalRef: 'sl-systems-alert-0001',
       rewardType: 'NONE',
       rewardDescription: '',
       maxTakers: 3,
@@ -308,6 +307,10 @@ async function main() {
     },
     ['Logistics'],
   )
+
+  // This seed wipes the user table, so the console accounts have to be put
+  // back before anything reads the counts below.
+  await seedAdmins()
 
   const counts = {
     users: await prisma.user.count(),

@@ -74,6 +74,9 @@ model User {
   role         Role     @default(STUDENT)
   bio          String?
   createdAt    DateTime @default(now())
+  // Only admin accounts carry one: the direct-link console sign-in is the one
+  // path that does not go through Microsoft. scrypt, salted per row.
+  passwordHash String?
 
   postedTasks     Task[]            @relation("TaskPoster")
   assignments     TaskAssignment[]
@@ -265,6 +268,9 @@ model EmailOutbox {
   @@index([sentAt, createdAt])
 }
 
+// Proposal table D6. The campus alert button and the SL Systems peer forwarder
+// that filled this were removed; the table is kept so the schema still carries
+// all 12 proposal tables, and forwardedToPeer with it. Nothing writes here now.
 model EmergencyAlert {
   id              String      @id @default(uuid()) @db.Uuid
   userId          String      @db.Uuid

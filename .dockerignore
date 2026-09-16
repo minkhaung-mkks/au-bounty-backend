@@ -1,5 +1,5 @@
 # Keep the image context to what the container actually runs: source, prisma/
-# (schema + migrations), peer-mock/ and the package manifests. Everything else
+# (schema + migrations) and the package manifests. Everything else
 # (deps, secrets, dev tooling, test suite, local compose) stays out.
 node_modules
 npm-debug.log*

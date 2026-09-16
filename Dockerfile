@@ -1,10 +1,8 @@
 # AU Bounty API image.
 #
-# Runs as the api service by default: waits for DATABASE_URL, applies
-# `prisma migrate deploy`, serves /aubounty/api on :4000. The same image also
-# serves as peer-mock via a compose command override:
-#   command: ["node", "peer-mock/server.js"]
-#   environment: DO_NOT_MIGRATE=1, PORT=7000
+# Runs as the api service: waits for DATABASE_URL, applies
+# `prisma migrate deploy`, serves /aubounty/api on :4000. A command override
+# with DO_NOT_MIGRATE=1 reuses the image for anything that needs no database
 # (see docker-entrypoint.sh).
 
 # ---- builder: full toolchain + generated prisma client -----------------------
@@ -49,7 +47,7 @@ WORKDIR /app
 ENV NODE_ENV=production \
     PORT=4000
 
-# Source (src, prisma migrations, peer-mock) from the context; deps from prune.
+# Source (src, prisma migrations) from the context; deps from prune.
 COPY --chown=node:node . .
 COPY --from=prune --chown=node:node /app/node_modules ./node_modules
 

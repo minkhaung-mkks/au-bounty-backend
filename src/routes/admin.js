@@ -44,21 +44,6 @@ const listReviewsQuery = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(50),
 })
 
-/** Only the fields the alert console renders; identity stays a card, not a row. */
-const serializeAlert = (a) => ({
-  id: a.id,
-  user: a.user,
-  lat: a.lat,
-  lng: a.lng,
-  message: a.message,
-  status: a.status,
-  forwardedToPeer: a.forwardedToPeer,
-  createdAt: a.createdAt,
-  resolvedAt: a.resolvedAt,
-})
-
-const alertInclude = { user: { select: { id: true, name: true, universityId: true } } }
-
 /* ------------------------------------------------------------- directory */
 
 // The role picker's search surface. SERVICE accounts are integration identity,
@@ -82,8 +67,8 @@ adminRouter.get('/admin/users', validate({ query: listUsersQuery }), async (req,
 
 /* ------------------------------------------------------------------ roles */
 
-// SERVICE accounts belong to the peer integration, not to people; nobody logs
-// in as one, so promoting or demoting one can only be a mistake.
+// SERVICE accounts are integration identity, not people; nobody logs in as
+// one, so promoting or demoting one can only be a mistake.
 adminRouter.patch(
   '/admin/users/:id/role',
   validate({ params: idParam, body: roleBody }),
@@ -268,42 +253,3 @@ adminRouter.get('/admin/reviews', validate({ query: listReviewsQuery }), async (
     })),
   })
 })
-
-/* ---------------------------------------------------------------- alerts */
-
-adminRouter.get(
-  '/admin/alerts',
-  validate({ query: z.object({ status: z.enum(['ACTIVE', 'RESOLVED', 'FLAGGED']).optional() }) }),
-  async (req, res) => {
-    const { status } = req.valid.query
-    const alerts = await prisma.emergencyAlert.findMany({
-      where: status ? { status } : undefined,
-      include: alertInclude,
-      orderBy: { createdAt: 'desc' },
-    })
-    res.json({ alerts: alerts.map(serializeAlert) })
-  },
-)
-
-// Only closing moves exist: an alert is resolved or flagged out of the active
-// queue, never reopened from here. resolvedAt records the first resolution and
-// survives a later flag, so the timeline stays honest.
-adminRouter.patch(
-  '/admin/alerts/:id',
-  validate({ params: idParam, body: z.object({ status: z.enum(['RESOLVED', 'FLAGGED']) }) }),
-  async (req, res) => {
-    const { status } = req.valid.body
-    const existing = await prisma.emergencyAlert.findUnique({ where: { id: req.valid.params.id } })
-    if (!existing) throw notFound('No alert with that id.')
-
-    const data = { status }
-    if (status === 'RESOLVED' && existing.resolvedAt == null) data.resolvedAt = new Date()
-
-    const alert = await prisma.emergencyAlert.update({
-      where: { id: existing.id },
-      data,
-      include: alertInclude,
-    })
-    res.json({ alert: serializeAlert(alert) })
-  },
-)

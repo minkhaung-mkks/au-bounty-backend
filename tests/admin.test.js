@@ -41,15 +41,6 @@ async function seedReview({ textHidden = false, createdAt } = {}) {
   return { poster, task, review }
 }
 
-/** Alert rows inserted directly; creation belongs to the emergency track. */
-async function seedAlert(overrides = {}) {
-  const user = overrides.user ?? (await createUser({ name: 'Alerting Student' }))
-  const alert = await prisma.emergencyAlert.create({
-    data: { userId: user.id, lat: 13.61, lng: 100.71, message: 'help', ...overrides },
-  })
-  return { user, alert }
-}
-
 /* --------------------------------------------------------- RBAC matrix */
 
 // Every console endpoint refuses students and teachers before any lookup runs.
@@ -66,8 +57,6 @@ const matrix = [
   ['post', '/admin/tags', { name: 'Matrix', category: 'ACADEMIC' }],
   ['patch', '/admin/reviews/:id/hide-text', { hidden: true }],
   ['get', '/admin/reviews?hidden=true', null],
-  ['get', '/admin/alerts', null],
-  ['patch', '/admin/alerts/:id', { status: 'RESOLVED' }],
 ]
 
 describe('admin RBAC matrix', () => {
@@ -179,7 +168,7 @@ describe('PATCH /admin/users/:id/role', () => {
   })
 
   test('SERVICE accounts keep their role', async () => {
-    const service = await createUser({ name: 'Peer Service', role: 'SERVICE' })
+    const service = await createUser({ name: 'Campus Safety', role: 'SERVICE' })
     const res = await request(app)
       .patch(`${api}/admin/users/${service.id}/role`)
       .set(as(admin))
@@ -504,101 +493,5 @@ describe('GET /admin/reviews', () => {
 
     const badHidden = await request(app).get(`${api}/admin/reviews?hidden=maybe`).set(as(admin))
     expect(badHidden.status).toBe(400)
-  })
-})
-
-/* ----------------------------------------------------------------- alerts */
-
-describe('GET /admin/alerts', () => {
-  test('lists newest first with identity cards, filters by status', async () => {
-    const oldest = await seedAlert({ createdAt: new Date(Date.now() - 3 * 60 * 1000) })
-    const newest = await seedAlert({
-      createdAt: new Date(Date.now() - 1 * 60 * 1000),
-      status: 'RESOLVED',
-      resolvedAt: new Date(Date.now() - 30 * 1000),
-      forwardedToPeer: true,
-      message: 'forwarded one',
-    })
-    const flagged = await seedAlert({
-      createdAt: new Date(Date.now() - 2 * 60 * 1000),
-      status: 'FLAGGED',
-    })
-
-    const all = await request(app).get(`${api}/admin/alerts`).set(as(admin))
-    expect(all.status).toBe(200)
-    expect(all.body.alerts.map((a) => a.id)).toEqual([
-      newest.alert.id,
-      flagged.alert.id,
-      oldest.alert.id,
-    ])
-    expect(all.body.alerts[0]).toMatchObject({
-      id: newest.alert.id,
-      user: { id: newest.user.id, name: 'Alerting Student', universityId: null },
-      lat: 13.61,
-      lng: 100.71,
-      message: 'forwarded one',
-      status: 'RESOLVED',
-      forwardedToPeer: true,
-    })
-    expect(all.body.alerts[0].resolvedAt).toBeTruthy()
-    expect(all.body.alerts[2].status).toBe('ACTIVE')
-
-    const activeOnly = await request(app).get(`${api}/admin/alerts?status=ACTIVE`).set(as(admin))
-    expect(activeOnly.status).toBe(200)
-    expect(activeOnly.body.alerts.map((a) => a.status)).toEqual(['ACTIVE'])
-
-    const resolvedOnly = await request(app).get(`${api}/admin/alerts?status=RESOLVED`).set(as(admin))
-    expect(resolvedOnly.body.alerts.map((a) => a.id)).toEqual([newest.alert.id])
-
-    const badStatus = await request(app).get(`${api}/admin/alerts?status=CANCELLED`).set(as(admin))
-    expect(badStatus.status).toBe(400)
-  })
-})
-
-describe('PATCH /admin/alerts/:id', () => {
-  test('resolving stamps resolvedAt once; flagging keeps the original stamp', async () => {
-    const { alert } = await seedAlert()
-    const firstStamp = new Date(Date.now() - 60 * 1000)
-
-    const resolved = await request(app)
-      .patch(`${api}/admin/alerts/${alert.id}`)
-      .set(as(admin))
-      .send({ status: 'RESOLVED' })
-    expect(resolved.status).toBe(200)
-    expect(resolved.body.alert.status).toBe('RESOLVED')
-    expect(resolved.body.alert.resolvedAt).toBeTruthy()
-
-    // Resolving again never re-stamps.
-    await prisma.emergencyAlert.update({ where: { id: alert.id }, data: { resolvedAt: firstStamp } })
-    const reResolved = await request(app)
-      .patch(`${api}/admin/alerts/${alert.id}`)
-      .set(as(admin))
-      .send({ status: 'RESOLVED' })
-    expect(reResolved.status).toBe(200)
-    expect(new Date(reResolved.body.alert.resolvedAt).getTime()).toBe(firstStamp.getTime())
-
-    // Flagging a resolved alert is allowed and preserves the resolution time.
-    const flagged = await request(app)
-      .patch(`${api}/admin/alerts/${alert.id}`)
-      .set(as(admin))
-      .send({ status: 'FLAGGED' })
-    expect(flagged.status).toBe(200)
-    expect(flagged.body.alert.status).toBe('FLAGGED')
-    expect(new Date(flagged.body.alert.resolvedAt).getTime()).toBe(firstStamp.getTime())
-  })
-
-  test('unknown alert is 404, ACTIVE is not a valid transition', async () => {
-    const missing = await request(app)
-      .patch(`${api}/admin/alerts/123e4567-e89b-42d3-a456-426614174000`)
-      .set(as(admin))
-      .send({ status: 'RESOLVED' })
-    expect(missing.status).toBe(404)
-
-    const { alert } = await seedAlert()
-    const reopen = await request(app)
-      .patch(`${api}/admin/alerts/${alert.id}`)
-      .set(as(admin))
-      .send({ status: 'ACTIVE' })
-    expect(reopen.status).toBe(400)
   })
 })

@@ -4,10 +4,11 @@
 # Default (api service): waits for the database in DATABASE_URL, applies
 # `prisma migrate deploy`, then execs CMD (`node src/index.js`) on :4000.
 #
-# peer-mock reuse: the same image doubles as the partner mock. Override the
-# command and skip the db entirely:
-#   command: ["node", "peer-mock/server.js"]
-#   environment: DO_NOT_MIGRATE=1, PORT=7000 (its /health needs no auth)
+# DO_NOT_MIGRATE=1 skips the database wait and the migration step, so the same
+# image can run a command that needs no database at all.
+#
+# SEED_ADMINS defaults to 1: every boot makes sure the three admin console
+# accounts exist. SEED_ADMINS=0 turns that off.
 set -e
 
 if [ "${DO_NOT_MIGRATE:-0}" = "1" ]; then
@@ -68,6 +69,13 @@ if [ "${SEED_ON_BOOT:-0}" = "1" ]; then
   }
   await prisma.$disconnect()
   ' || exit 1
+fi
+
+# The three admin console accounts, unlike the demo seed above, are made sure
+# of on every boot: idempotent by email, no wipe, and it runs after the demo
+# seed because that one empties the user table.
+if [ "${SEED_ADMINS:-1}" = "1" ]; then
+  node prisma/seedAdmins.js
 fi
 
 exec "$@"

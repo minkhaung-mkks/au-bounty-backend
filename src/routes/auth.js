@@ -1,6 +1,10 @@
 import { Router } from 'express'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { z } from 'zod'
 import { prisma } from '../lib/prisma.js'
+import { validate } from '../middleware/validate.js'
+import { hashPassword, verifyPassword } from '../auth/password.js'
+import { clearFailures, recordFailure, retryAfterSeconds } from '../auth/loginThrottle.js'
 import { ENTRA_SCOPES, isEntraConfigured, msalClient, redirectUri } from '../auth/entra.js'
 import { identityFromEmail } from '../auth/auIdentity.js'
 import { parseCookies } from '../auth/cookies.js'
@@ -141,7 +145,7 @@ async function upsertMicrosoftUser(result) {
       data: { msadOid: oid, name, email, universityId, role: derived.role },
     })
   } catch (err) {
-    // The directory email matched a user created some other way (seed, peer
+    // The directory email matched a user created some other way (seed,
     // import). Claim that row rather than failing the sign-in.
     if (err?.code === 'P2002') {
       // A derived id someone else already owns must not cost anyone their
@@ -162,6 +166,79 @@ async function upsertMicrosoftUser(result) {
     throw err
   }
 }
+
+/* ---------------------------------------------------- admin password login */
+
+const adminLoginBody = z.object({
+  email: z.string().trim().toLowerCase().pipe(z.email('Enter an email address.')),
+  password: z.string().min(1, 'Enter a password.').max(200),
+})
+
+// A hash to check against when the email matches nobody, so a missing account
+// costs the same scrypt work as a wrong password and cannot be spotted by
+// timing. Computed once, lazily, because the parameters are deliberately slow.
+let decoyHash = null
+const decoy = async () => {
+  decoyHash ??= await hashPassword(randomBytes(32).toString('hex'))
+  return decoyHash
+}
+
+/**
+ * POST /auth/admin/login — the console's own sign-in, reachable only by typing
+ * the direct link. Microsoft remains the way everyone else gets in; this exists
+ * so an administrator can still reach the console when SSO is not configured or
+ * not available.
+ *
+ * Only ADMIN rows with a password set can use it. Every rejection answers with
+ * the same message and status, so the form cannot be used to enumerate which
+ * addresses exist or which of them are administrators.
+ */
+authRouter.post('/auth/admin/login', validate({ body: adminLoginBody }), async (req, res, next) => {
+  const { email, password } = req.valid.body
+  // Throttle per source address and per targeted account: one attacker cannot
+  // spray many accounts, and one account cannot be sprayed from many places.
+  const keys = [`ip:${req.ip}`, `email:${email}`]
+  try {
+    const wait = Math.max(...keys.map((k) => retryAfterSeconds(k)))
+    if (wait > 0) {
+      res.set('Retry-After', String(wait))
+      return res.status(429).json({
+        error: {
+          code: 'TOO_MANY_ATTEMPTS',
+          message: `Too many sign-in attempts. Try again in ${Math.ceil(wait / 60)} minute(s).`,
+        },
+      })
+    }
+
+    const user = await prisma.user.findUnique({ where: { email } })
+    const stored = user?.role === 'ADMIN' ? user.passwordHash : null
+    const ok = await verifyPassword(password, stored ?? (await decoy()))
+
+    if (!ok || !stored) {
+      for (const key of keys) recordFailure(key)
+      return res.status(401).json({
+        error: { code: 'AUTH_FAILED', message: 'Wrong email or password.' },
+      })
+    }
+
+    for (const key of keys) clearFailures(key)
+
+    const orgs = await prisma.orgMembership.findMany({
+      where: { userId: user.id },
+      select: { orgId: true },
+    })
+    const token = await signSessionToken({
+      id: user.id,
+      role: user.role,
+      name: user.name,
+      orgIds: orgs.map((m) => m.orgId),
+    })
+    res.cookie(TOKEN_COOKIE, token, sessionCookieOptions())
+    res.status(200).json({ user: { id: user.id, name: user.name, role: user.role } })
+  } catch (err) {
+    next(err)
+  }
+})
 
 /* ------------------------------------------------------------------ logout */
 

@@ -14,7 +14,7 @@ const days = (n) => n * 24 * 60 * 60 * 1000
  * D8 trigger half: the three notification emails, all deduped by the outbox's
  * (kind, refId) constraint. One function is called inline by the completion
  * route; the two scans run from the scheduler loop (same start/stop shape as
- * the alert sweeper: immediate pass, then every MAIL_INTERVAL_MS, re-entrancy
+ * immediate pass, then every MAIL_INTERVAL_MS, re-entrancy
  * guarded, timer unref'd so the HTTP server owns process lifetime).
  */
 
