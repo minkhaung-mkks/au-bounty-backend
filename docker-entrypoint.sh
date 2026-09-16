@@ -73,7 +73,9 @@ fi
 
 # The three admin console accounts, unlike the demo seed above, are made sure
 # of on every boot: idempotent by email, no wipe, and it runs after the demo
-# seed because that one empties the user table.
+# seed because that one empties the user table. ADMIN_SEED_PASSWORD comes from
+# the environment when set; the demo default applies otherwise. For a real
+# deployment: route it through loadSecrets (see src/lib/secrets.js) instead.
 if [ "${SEED_ADMINS:-1}" = "1" ]; then
   node prisma/seedAdmins.js
 fi

@@ -23,7 +23,6 @@ import { SecretClient } from '@azure/keyvault-secrets'
 export const SECRET_MAP = {
   'entra-client-secret': 'ENTRA_CLIENT_SECRET',
   'jwt-secret': 'JWT_SECRET',
-  'peer-api-key': 'PEER_API_KEY',
   'resend-api-key': 'RESEND_API_KEY',
   'google-maps-key': 'GOOGLE_MAPS_KEY',
   'google-translate-key': 'GOOGLE_TRANSLATE_KEY',
@@ -31,8 +30,8 @@ export const SECRET_MAP = {
 
 /**
  * Fetches secrets into process.env. No-op unless SECRETS_PROVIDER=keyvault.
- * `only` narrows the fetch to specific vault names (peer-mock needs exactly
- * one), because a service should only pull the credentials it uses.
+ * `only` narrows the fetch to specific vault names, because a service should
+ * only pull the credentials it uses.
  */
 export async function loadSecrets(only) {
   const provider = (process.env.SECRETS_PROVIDER ?? 'env').trim().toLowerCase()
