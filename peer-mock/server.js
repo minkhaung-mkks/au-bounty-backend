@@ -112,11 +112,20 @@ export function startPeerMock({ apiKey, port = 0, host = '127.0.0.1' } = {}) {
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
 if (isMain) {
-  const port = Number(process.env.PORT) || 7000
-  if (!process.env.MOCK_API_KEY) {
-    console.warn('MOCK_API_KEY is not set: every authenticated request will get 401.')
-  }
-  createPeerMock().listen(port, () => {
-    console.log(`peer-mock on http://localhost:${port} (health: /health)`)
-  })
+  // Same secrets bootstrap as the api (no-op with SECRETS_PROVIDER=env), then
+  // fall back to the vault-loaded PEER_API_KEY when MOCK_API_KEY was not
+  // injected by compose. Async IIFE: the module stays import-safe for tests.
+  ;(async () => {
+    const { loadSecrets } = await import('../src/lib/secrets.js')
+    await loadSecrets(['peer-api-key'])
+    process.env.MOCK_API_KEY ??= process.env.PEER_API_KEY
+
+    const port = Number(process.env.PORT) || 7000
+    if (!process.env.MOCK_API_KEY) {
+      console.warn('MOCK_API_KEY is not set: every authenticated request will get 401.')
+    }
+    createPeerMock().listen(port, () => {
+      console.log(`peer-mock on http://localhost:${port} (health: /health)`)
+    })
+  })()
 }

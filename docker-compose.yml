@@ -21,7 +21,7 @@ services:
   # S3_ENDPOINT=http://localhost:9100, S3_BUCKET=aubounty and path-style on
   # (the defaults in .env.example).
   minio:
-    image: minio/minio
+    image: quay.io/minio/minio
     container_name: aubounty-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
@@ -41,7 +41,7 @@ services:
 
   # One-shot: create the bucket the app expects, then exit.
   minio-init:
-    image: minio/mc
+    image: quay.io/minio/mc
     container_name: aubounty-minio-init
     depends_on:
       minio:

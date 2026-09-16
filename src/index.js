@@ -4,10 +4,15 @@ import { prisma } from './lib/prisma.js'
 import { attachSockets } from './realtime/gateway.js'
 import { startAlertSweeper, stopAlertSweeper } from './services/alertSweeper.js'
 import { startMailScheduler, stopMailScheduler } from './services/mailScheduler.js'
+import { loadSecrets } from './lib/secrets.js'
 
 const port = Number(process.env.PORT) || 4000
 
 async function start() {
+  // Key Vault bootstrap (no-op with SECRETS_PROVIDER=env): credentials land in
+  // process.env before anything reads them.
+  await loadSecrets()
+
   try {
     await prisma.$queryRaw`SELECT 1`
   } catch (err) {
