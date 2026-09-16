@@ -118,7 +118,9 @@ if (isMain) {
   ;(async () => {
     const { loadSecrets } = await import('../src/lib/secrets.js')
     await loadSecrets(['peer-api-key'])
-    process.env.MOCK_API_KEY ??= process.env.PEER_API_KEY
+    // `||` not `??=`: compose may inject MOCK_API_KEY as an empty string when
+    // the key moved to the vault, and an empty key must still fall through.
+    process.env.MOCK_API_KEY = process.env.MOCK_API_KEY || process.env.PEER_API_KEY
 
     const port = Number(process.env.PORT) || 7000
     if (!process.env.MOCK_API_KEY) {
