@@ -4,7 +4,9 @@ import { prisma } from '../src/lib/prisma.js'
 import { appWith, createUser, resetDb, sessionCookie } from './helpers.js'
 
 // Presigning is a local SigV4 computation, so the unit tests only need the
-// S3 env to be *set*; nothing contacts the store. The live round-trip below
+// S3 env to be *set*; nothing contacts the store. S3_PUBLIC_ENDPOINT stays
+// unset except in the endpoint tests below, so every other URL asserted here
+// exercises the S3_ENDPOINT fallback. The live round-trip below
 // (AUBOUNTY_TEST_S3=1) uses the real compose MinIO with real credentials.
 process.env.S3_ENDPOINT ??= 'http://localhost:9100'
 process.env.S3_BUCKET ??= 'aubounty'
@@ -267,6 +269,56 @@ describe('POST /files/presign', () => {
     } finally {
       process.env.S3_BUCKET = previous
     }
+  })
+})
+
+/* -------------------------------------------------------------------------- */
+
+describe('presigned url endpoints', () => {
+  // Inside compose the api reaches MinIO at http://minio:9000 while browsers
+  // see another address, so URLs handed out must carry the public endpoint.
+  // Signing is offline, so only the env matters here.
+
+  /** Runs `body` with `env` applied, restoring whatever was there before. */
+  async function withEnv(env, body) {
+    const saved = Object.fromEntries(Object.keys(env).map((k) => [k, process.env[k]]))
+    Object.assign(process.env, env)
+    try {
+      await body()
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
+  }
+
+  test('PUT and GET urls embed S3_PUBLIC_ENDPOINT when set', async () => {
+    await withEnv({ S3_PUBLIC_ENDPOINT: 'https://files.example.test:9443' }, async () => {
+      const app = appWith()
+      const { poster, task } = await seed()
+
+      const res = await presignTask(app, poster, { taskId: task.id })
+      expect(res.status).toBe(201)
+      const upload = new URL(res.body.uploadUrl)
+      expect(upload.origin).toBe('https://files.example.test:9443')
+      expect(upload.pathname).toContain('/aubounty/attachments/')
+
+      const link = await request(app)
+        .get(`${api}/files/${res.body.attachmentId}/url`)
+        .set(dev(poster))
+      expect(link.status).toBe(200)
+      expect(new URL(link.body.url).origin).toBe('https://files.example.test:9443')
+    })
+  })
+
+  test('urls fall back to S3_ENDPOINT when S3_PUBLIC_ENDPOINT is unset', async () => {
+    const app = appWith()
+    const { poster, task } = await seed()
+
+    const res = await presignTask(app, poster, { taskId: task.id })
+    expect(res.status).toBe(201)
+    expect(new URL(res.body.uploadUrl).origin).toBe(new URL(process.env.S3_ENDPOINT).origin)
   })
 })
 
