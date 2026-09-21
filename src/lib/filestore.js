@@ -13,9 +13,15 @@ import { ApiError } from './errors.js'
  * URLs (@aws-sdk/client-s3 + s3-request-presigner), env-configured so local
  * dev is MinIO with path-style addressing and prod is any S3-compatible store.
  *
- * The client is lazy and nothing here throws at import time: a missing config
- * must never crash boot. Signing itself is local (SigV4), so presigning works
- * even when the store is unreachable; only the signed request would fail.
+ * Two endpoints, two clients. The api's own network calls (deleteObject) go
+ * through S3_ENDPOINT, which inside compose is the internal http://minio:9000.
+ * Presigned URLs land in browsers, which cannot resolve that hostname, so
+ * signing embeds S3_PUBLIC_ENDPOINT instead (falling back to S3_ENDPOINT).
+ *
+ * The clients are lazy and nothing here throws at import time: a missing
+ * config must never crash boot. Signing itself is local (SigV4), so
+ * presigning works even when the store is unreachable; only the signed
+ * request would fail.
  */
 
 const DEFAULT_TTL_SECONDS = 300
@@ -32,6 +38,9 @@ const sanitizeFileName = (fileName) => fileName.replace(UNSAFE_FILENAME_CHARS, '
 function s3Settings() {
   return {
     endpoint: process.env.S3_ENDPOINT || undefined,
+    // What presigned URLs are signed against: browsers must be able to
+    // resolve it, unlike the api-internal S3_ENDPOINT above.
+    publicEndpoint: process.env.S3_PUBLIC_ENDPOINT || process.env.S3_ENDPOINT || undefined,
     region: process.env.S3_REGION || 'us-east-1',
     bucket: process.env.S3_BUCKET,
     credentials: {
@@ -48,10 +57,12 @@ export const isStorageConfigured = () => {
   return Boolean(s.bucket && s.credentials.accessKeyId && s.credentials.secretAccessKey)
 }
 
-let cachedClient = null
+// One S3Client per purpose, cached and rebuilt only when the env changes
+// under us (tests swap configs per process). The clients are cheap and hold
+// no connections, so one per endpoint costs nothing.
+const clientCache = new Map()
 
-function client() {
-  const settings = s3Settings()
+function s3ClientFor(purpose, settings, endpoint) {
   if (!isStorageConfigured()) {
     throw new ApiError(
       503,
@@ -59,21 +70,19 @@ function client() {
       'File storage is not configured. Set the S3_* environment variables.',
     )
   }
-  // Rebuild only if the env changed under us (tests swap configs per process).
-  if (
-    !cachedClient ||
-    cachedClient.endpoint !== settings.endpoint ||
-    cachedClient.region !== settings.region ||
-    cachedClient.forcePathStyle !== settings.forcePathStyle ||
-    cachedClient.accessKeyId !== settings.credentials.accessKeyId
-  ) {
-    cachedClient = {
-      endpoint: settings.endpoint,
-      region: settings.region,
-      forcePathStyle: settings.forcePathStyle,
-      accessKeyId: settings.credentials.accessKeyId,
+  const fingerprint = [
+    endpoint,
+    settings.region,
+    settings.forcePathStyle,
+    settings.credentials.accessKeyId,
+    settings.credentials.secretAccessKey,
+  ].join(' ')
+  let cached = clientCache.get(purpose)
+  if (!cached || cached.fingerprint !== fingerprint) {
+    cached = {
+      fingerprint,
       s3: new S3Client({
-        endpoint: settings.endpoint,
+        endpoint,
         region: settings.region,
         forcePathStyle: settings.forcePathStyle,
         credentials: {
@@ -82,9 +91,16 @@ function client() {
         },
       }),
     }
+    clientCache.set(purpose, cached)
   }
-  return cachedClient.s3
+  return cached.s3
 }
+
+/** Carries the api-internal S3_ENDPOINT: real network calls go through it. */
+const networkClient = () => s3ClientFor('network', s3Settings(), s3Settings().endpoint)
+
+/** Embeds the public endpoint in every URL it signs; never connects. */
+const presignClient = () => s3ClientFor('presign', s3Settings(), s3Settings().publicEndpoint)
 
 export const fileStore = {
   /**
@@ -99,7 +115,7 @@ export const fileStore = {
       Key: key,
       ContentType: contentType,
     })
-    return getSignedUrl(client(), command, { expiresIn: ttlSeconds })
+    return getSignedUrl(presignClient(), command, { expiresIn: ttlSeconds })
   },
 
   /**
@@ -116,13 +132,13 @@ export const fileStore = {
           }
         : {}),
     })
-    return getSignedUrl(client(), command, { expiresIn: ttlSeconds })
+    return getSignedUrl(presignClient(), command, { expiresIn: ttlSeconds })
   },
 
   /** Removes the stored object. Callers treat failures as best-effort. */
   async deleteObject(key) {
     const command = new DeleteObjectCommand({ Bucket: s3Settings().bucket, Key: key })
-    await client().send(command)
+    await networkClient().send(command)
   },
 }
 
